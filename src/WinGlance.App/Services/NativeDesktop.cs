@@ -13,6 +13,8 @@ public sealed class TrayIcon : IDisposable
     private NotifyIconData _data;
     public Action? ShowRequested { get; set; }
     public Action? OverlayRequested { get; set; }
+    public Action? OverlayInteractionRequested { get; set; }
+    public bool CanRestoreOverlayInteraction { get; set; }
     public Action? ExitRequested { get; set; }
     public Action? SessionQuery { get; set; }
     public Action<bool>? SessionEnd { get; set; }
@@ -42,7 +44,11 @@ public sealed class TrayIcon : IDisposable
         if (msg == 0x0011) { SessionQuery?.Invoke(); return 1; } // WM_QUERYENDSESSION: allow shutdown
         if (msg == 0x0016) { SessionEnd?.Invoke(w != 0); return 0; } // WM_ENDSESSION, including cancellation
         if (msg is 0x007E or 0x001A) DisplayChanged?.Invoke(); // display/work-area changes
-        if (msg == _taskbarCreated) IsAvailable = Shell_NotifyIcon(0, ref _data);
+        if (msg == _taskbarCreated)
+        {
+            IsAvailable = Shell_NotifyIcon(0, ref _data);
+            if (!IsAvailable) ShowRequested?.Invoke();
+        }
         if (msg == 0x8001)
         {
             if ((uint)l == 0x0202 || (uint)l == 0x0203) ShowRequested?.Invoke();
@@ -51,6 +57,7 @@ public sealed class TrayIcon : IDisposable
                 var menu = CreatePopupMenu();
                 AppendMenu(menu, 0, 1, "打开 WinGlance");
                 AppendMenu(menu, 0, 2, "显示 / 隐藏悬浮条");
+                AppendMenu(menu, CanRestoreOverlayInteraction ? 0u : 1u, 4, "恢复悬浮条交互(&R)");
                 AppendMenu(menu, 0x800, 0, null);
                 AppendMenu(menu, 0, 3, "退出");
                 GetCursorPos(out var point);
@@ -60,6 +67,7 @@ public sealed class TrayIcon : IDisposable
                 if (selected == 1) ShowRequested?.Invoke();
                 if (selected == 2) OverlayRequested?.Invoke();
                 if (selected == 3) ExitRequested?.Invoke();
+                if (selected == 4) OverlayInteractionRequested?.Invoke();
             }
         }
         return DefSubclassProc(hwnd, msg, w, l);

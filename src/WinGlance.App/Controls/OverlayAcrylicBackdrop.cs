@@ -15,6 +15,19 @@ internal sealed class OverlayAcrylicBackdrop : SystemBackdrop
     private bool _updatingPolicy;
     private bool _notificationQueued;
     private string _notificationReason = "initialized";
+    private double _opacity = .8;
+
+    internal void SetOpacity(double opacity)
+    {
+        _opacity = double.IsFinite(opacity) ? Math.Clamp(opacity, .2, 1) : .8;
+        ApplyOpacity();
+    }
+    private void ApplyOpacity()
+    {
+        if (_controller is null) return;
+        _controller.TintOpacity = (float)_opacity;
+        _controller.LuminosityOpacity = (float)_opacity;
+    }
 
     public string Status { get; private set; } = "NotConnected";
     public string State { get; private set; } = "Unavailable";
@@ -39,6 +52,7 @@ internal sealed class OverlayAcrylicBackdrop : SystemBackdrop
             _configuration = new SystemBackdropConfiguration();
             UpdateConfiguration(connectedTarget, xamlRoot);
             _controller = new DesktopAcrylicController { Kind = DesktopAcrylicKind.Thin };
+            ApplyOpacity();
             _controller.StateChanged += Controller_StateChanged;
             _controller.SetSystemBackdropConfiguration(_configuration);
             if (!_controller.AddSystemBackdropTarget(connectedTarget))
@@ -77,6 +91,7 @@ internal sealed class OverlayAcrylicBackdrop : SystemBackdrop
             _configuration.HighContrastBackgroundColor = source.HighContrastBackgroundColor;
             _configuration.IsHighContrast = HighContrast = source.IsHighContrast;
             _configuration.IsInputActive = true;
+            ApplyOpacity();
         }
         finally { _updatingPolicy = false; }
     }

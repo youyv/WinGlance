@@ -7,7 +7,7 @@ namespace WinGlance.Windows.Telemetry;
 
 internal sealed partial class PdhMetrics
 {
-    private readonly Dictionary<string, Dictionary<string, RawCounter>> _rawPrevious = [];
+    private readonly Dictionary<string, Dictionary<string, DiskCounterValue>> _rawPrevious = [];
     private readonly Dictionary<string, (uint Type, long TimeBase)> _rawTypes = [];
     private readonly DxgiAdapters _adapters = new();
     private long _accountingTimestamp;
@@ -139,31 +139,10 @@ internal sealed partial class PdhMetrics
         { _rawPrevious.Remove(key); return Missing(MetricState.Error, "磁盘原始计数数组不可用"); }
         _rawPrevious.TryGetValue(key, out var previous);
         _rawPrevious[key] = current;
-        foreach (string id in current.Keys)
-            devices[id] = Missing(MetricState.WarmingUp, "磁盘首次出现、设备范围变化或计数间断，正在建立基线");
-        if (!continuous || previous is null || previous.Count != current.Count || !previous.Keys.All(current.ContainsKey))
-            return Missing(MetricState.WarmingUp, "磁盘设备范围变化或采集间断，正在建立基线");
-        long bytes = 0;
-        double? duration = null;
-        foreach (var item in current)
-        {
-            var old = previous[item.Key];
-            var value = item.Value;
-            if (value.First < old.First || value.Second <= old.Second)
-                return Missing(MetricState.WarmingUp, "磁盘计数器已重置");
-            double elapsed = (value.Second - old.Second) / (double)metadata.TimeBase;
-            if (!AccountingMath.Continuous(elapsed) || duration.HasValue && Math.Abs(duration.Value - elapsed) > 0.01)
-                return Missing(MetricState.WarmingUp, "磁盘计数区间不连续或设备时间基准不一致");
-            duration = elapsed;
-            devices[item.Key] = AccountingMath.Bytes(value.First - old.First, elapsed, true);
-            try { bytes = checked(bytes + value.First - old.First); }
-            catch (OverflowException) { return Missing(MetricState.Error, "磁盘累计计数溢出"); }
-        }
-        return AccountingMath.Bytes(bytes, duration ?? fallbackSeconds, true,
-            detail: "物理磁盘设备原始字节差分，不含 _Total 重复项");
+        return DiskCounterAccounting.Calculate(current, previous, metadata.TimeBase, fallbackSeconds, continuous, out devices);
     }
 
-    private static Dictionary<string, RawCounter>? ReadRawArray(nint counter)
+    private static Dictionary<string, DiskCounterValue>? ReadRawArray(nint counter)
     {
         uint size = 0, count = 0;
         uint sizing = PdhGetRawCounterArray(counter, ref size, ref count, 0);
@@ -177,13 +156,13 @@ internal sealed partial class PdhMetrics
                 uint status = PdhGetRawCounterArray(counter, ref size, ref count, buffer);
                 if (status == MoreData && size <= 16 * 1024 * 1024) continue;
                 if (status != 0 || (ulong)count * (uint)Marshal.SizeOf<RawItem>() > capacity) return null;
-                var result = new Dictionary<string, RawCounter>(StringComparer.OrdinalIgnoreCase);
+                var result = new Dictionary<string, DiskCounterValue>(StringComparer.OrdinalIgnoreCase);
                 for (int i = 0; i < count; i++)
                 {
                     var item = Marshal.PtrToStructure<RawItem>(buffer + i * Marshal.SizeOf<RawItem>());
                     string? name = Marshal.PtrToStringUni(item.Name);
                     if (name == "_Total") continue;
-                    if (name is null || item.Counter.Status > 1 || item.Counter.First < 0 || !result.TryAdd(name, item.Counter)) return null;
+                    if (name is null || !result.TryAdd(name, new(item.Counter.First, item.Counter.Second, item.Counter.Status))) return null;
                 }
                 return result;
             }

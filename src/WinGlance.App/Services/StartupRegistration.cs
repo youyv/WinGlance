@@ -10,7 +10,7 @@ public enum StartupRegistrationState
     InvalidValue
 }
 
-public sealed record StartupRegistrationStatus(StartupRegistrationState State, string? RegisteredCommand)
+public sealed record StartupRegistrationStatus(StartupRegistrationState State, string? RegisteredCommand, bool StartMinimized = false)
 {
     public bool IsEnabled => State == StartupRegistrationState.Enabled;
     public bool HasRegistration => State != StartupRegistrationState.Disabled;
@@ -42,18 +42,19 @@ public static class StartupRegistration
             return new(StartupRegistrationState.DifferentCommand, command);
         }
 
-        var state = string.Equals(command, currentCommand, StringComparison.OrdinalIgnoreCase)
+        bool minimized = string.Equals(command, currentCommand + " --minimized", StringComparison.OrdinalIgnoreCase);
+        var state = string.Equals(command, currentCommand, StringComparison.OrdinalIgnoreCase) || minimized
             ? StartupRegistrationState.Enabled
             : StartupRegistrationState.DifferentCommand;
-        return new(state, command);
+        return new(state, command, minimized);
     }
 
     /// <summary>Changes only the WinGlance value and returns its verified state. Errors are reported to the caller.</summary>
-    public static StartupRegistrationStatus SetEnabled(bool enabled)
+    public static StartupRegistrationStatus SetEnabled(bool enabled, bool startMinimized = false)
     {
         if (enabled)
         {
-            var command = GetCurrentCommand();
+            var command = GetCurrentCommand(startMinimized);
             using var key = Registry.CurrentUser.CreateSubKey(RunKeyPath, writable: true)
                 ?? throw new IOException("无法打开当前用户的开机启动设置。");
             key.SetValue(ValueName, command, RegistryValueKind.String);
@@ -67,12 +68,12 @@ public static class StartupRegistration
 
         var status = GetStatus();
         var expected = enabled ? StartupRegistrationState.Enabled : StartupRegistrationState.Disabled;
-        if (status.State != expected)
+        if (status.State != expected || (enabled && status.StartMinimized != startMinimized))
             throw new IOException("开机启动设置未能保存，或已被其他程序更改，请重试。");
         return status;
     }
 
-    private static string GetCurrentCommand()
+    private static string GetCurrentCommand(bool minimized = false)
     {
         var path = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path) ||
@@ -81,9 +82,13 @@ public static class StartupRegistration
             throw new InvalidOperationException("无法确认应用程序路径，请通过 WinGlance.App.exe 运行应用后设置开机启动。");
 
         // Run uses a command line, so quote even paths that do not currently contain spaces.
-        var command = $"\"{path}\"";
+        var command = BuildCommand(path, minimized);
         if (command.Length > 260)
             throw new InvalidOperationException("应用程序路径过长，无法设置开机启动，请将 WinGlance 移至较短的路径。");
         return command;
     }
+
+    internal static string BuildCommand(string path, bool minimized) => $"\"{path}\"" + (minimized ? " --minimized" : "");
+    internal static bool RequestsMinimized(IEnumerable<string> arguments) => arguments.Any(a => a.Equals("--minimized", StringComparison.OrdinalIgnoreCase));
+    internal static bool ShouldHideOnLaunch(IEnumerable<string> arguments, bool trayAvailable) => trayAvailable && RequestsMinimized(arguments);
 }

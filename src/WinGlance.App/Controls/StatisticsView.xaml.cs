@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using WinGlance.App.ViewModels;
 using WinGlance.Core;
+using WinGlance.App.Services;
 using WinGlance.Statistics;
 
 namespace WinGlance.App.Controls;
@@ -22,6 +23,8 @@ public sealed partial class StatisticsView : UserControl
     private DateTimeOffset _nextReorder, _nextDetail;
     public event Action<bool>? HideSystemChanged;
     public event Action? EnhancedRequested;
+    public event Action? ReconnectRequested;
+    public event Action? CollectionNoticeDismissed;
     public Func<StatisticsRange, Task<bool>>? ConfirmReset { get; set; }
     private StatisticsRange Range => (StatisticsRange)Math.Max(0, RangePicker.SelectedIndex);
 
@@ -48,12 +51,18 @@ public sealed partial class StatisticsView : UserControl
         if (StatsHideSystem.IsOn == value) return;
         StatsHideSystem.IsOn = value;
     }
-    public void SetCollectionState(string label, bool enabled, string description)
+    internal void SetCollectionState(CollectionPresentation state)
     {
-        StatsEnhancedButton.Content = label;
-        StatsEnhancedButton.IsEnabled = enabled;
-        ToolTipService.SetToolTip(StatsEnhancedButton, description);
+        StatsEnhancedButton.Content = state.Label;
+        StatsEnhancedButton.IsEnabled = state.CanEnhance;
+        StatsReconnectButton.IsEnabled = state.CanReconnect;
+        ToolTipService.SetToolTip(StatsEnhancedButton, state.Status);
+        CollectionStatus.Text = state.Live + " · " + state.Status;
+        CollectionNotice.Message = state.Notice ?? "";
+        CollectionNotice.IsOpen = state.Notice is not null;
     }
+    private void CollectionNotice_CloseButtonClick(InfoBar sender, object args) => CollectionNoticeDismissed?.Invoke();
+    private void Reconnect_Click(object sender, RoutedEventArgs e) => ReconnectRequested?.Invoke();
     private async void Refresh()
     {
         if (!_active || _resetting) return;

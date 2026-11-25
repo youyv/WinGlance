@@ -3,6 +3,8 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Runtime.Versioning;
+using System.Security.Claims;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using WinGlance.App.Services;
@@ -176,6 +178,46 @@ Check(failures.Any(x => x.Contains("flush-fixture")) && failures.Any(x => x.Cont
 
 // All launches below are injected: these tests only connect in-process named-pipe peers.
 // No collector executable, ShellExecute, UAC, or unrelated process is launched.
+const string adminSid = "S-1-5-32-544";
+var filteredAdministrator = new ClaimsIdentity([new Claim(ClaimTypes.DenyOnlySid, adminSid)]);
+Check(CollectorClient.CanRequestElevation(filteredAdministrator),
+    "UAC-filtered administrator can request elevation using its deny-only administrator SID");
+Check(CollectorClient.CanRequestElevation(new ClaimsIdentity([new Claim(ClaimTypes.GroupSid, adminSid)])),
+    "enabled administrator group can request elevation");
+Check(!CollectorClient.CanRequestElevation(new ClaimsIdentity([new Claim(ClaimTypes.GroupSid, "S-1-5-32-545")])),
+    "standard user without administrator membership cannot request same-account elevation");
+Check(!CollectorClient.CanRequestElevation(new ClaimsIdentity([new Claim(ClaimTypes.Name, adminSid), new Claim(ClaimTypes.DenyOnlySid, "S-1-5-32-545")])),
+    "unrelated claims and unrelated deny-only groups do not grant elevation eligibility");
+
+using (var launcher = new FakeLauncher())
+using (var client = new CollectorClient(launcher.ExistingPath, () => CollectorClient.CanRequestElevation(filteredAdministrator), launcher.Launch))
+{
+    Task ordinary = client.StartAsync();
+    await Until(() => client.Connection.Connected, "filtered administrator ordinary connection");
+    Task enhanced = client.StartAsync(true);
+    await Until(() => client.Connection.Connected && client.Connection.Enhanced, "filtered administrator enhanced connection");
+    Check(launcher.Launches == 2 && launcher.Infos[1].UseShellExecute && launcher.Infos[1].Verb == "runas",
+        "ordinary collection switches to a UAC launch for a filtered administrator");
+    await ordinary.WaitAsync(TimeSpan.FromSeconds(5));
+    client.Dispose();
+    await enhanced.WaitAsync(TimeSpan.FromSeconds(5));
+}
+
+using (var identity = WindowsIdentity.GetCurrent())
+{
+    if (identity.Claims.Any(claim => claim.Type == ClaimTypes.DenyOnlySid && claim.Value == adminSid))
+    {
+        using var launcher = new FakeLauncher();
+        using var client = new CollectorClient(launcher.ExistingPath, CollectorClient.CanElevateCurrentAccount, launcher.Launch);
+        Task run = client.StartAsync(true);
+        await Until(() => client.Connection.Connected, "real filtered Windows token reaches the injected UAC launcher");
+        Check(launcher.Launches == 1 && launcher.Infos[0].Verb == "runas" && client.Connection.Enhanced,
+            "real filtered Windows administrator token passes production eligibility and reaches the launcher");
+        client.Dispose();
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+}
+
 using (var launcher = new FakeLauncher())
 using (var client = new CollectorClient(launcher.ExistingPath, () => true, launcher.Launch))
 {
@@ -205,11 +247,18 @@ using (var client = new CollectorClient(launcher.ExistingPath, () => true, launc
 
 using (var launcher = new FakeLauncher())
 using (var client = new CollectorClient(launcher.ExistingPath, () => true,
-    (_, _) => Task.FromException<Process?>(new Win32Exception(1223))))
+    (info, token) => info.Verb == "runas" ? Task.FromException<Process?>(new Win32Exception(1223)) : launcher.Launch(info, token)))
 {
-    await client.StartAsync(true);
-    Check(!client.Connection.Connected && !client.Connection.Connecting && !client.Connection.Enhanced && client.Connection.Message.Contains("已取消"),
-        "UAC cancellation error 1223 returns a retryable disconnected state");
+    Task run = client.StartAsync(true);
+    await Until(() => client.Connection.Connected, "ordinary recovery after UAC cancel");
+    Check(!client.Connection.Connecting && !client.Connection.Enhanced && client.Connection.Notice!.Contains("已取消") && launcher.Launches == 1,
+        "UAC cancellation automatically restores ordinary collection and retains the operation notice");
+    await launcher.Peers[0].Send(Snapshots.Create(false));
+    Check(client.Connection.Notice is not null, "ordinary snapshots do not dismiss the cancelled UAC notice");
+    client.DismissNotice();
+    Check(client.Connection.Notice is null && client.Connection.Connected, "explicit dismissal clears only the operation notice");
+    client.Dispose();
+    await run.WaitAsync(TimeSpan.FromSeconds(5));
 }
 
 using (var launcher = new FakeLauncher())
@@ -220,11 +269,12 @@ using (var client = new CollectorClient(launcher.ExistingPath, () => false, laun
     Task ordinary = client.StartAsync();
     await Until(() => client.Connection.Connected, "ordinary connected snapshot");
     await client.StartAsync(true);
-    Check(launcher.Launches == 1 && client.Connection.Connected && !client.Connection.Enhanced && client.Connection.Message.Contains("另一账户"),
+    Check(launcher.Launches == 1 && client.Connection.Connected && !client.Connection.Enhanced && client.Connection.Notice!.Contains("另一账户"),
         "cross-account enhancement request preserves the connected ordinary collector");
     await launcher.Peers[0].Send(Snapshots.Create(false, 2));
     await Until(() => Volatile.Read(ref snapshots) == 2, "ordinary stream survives declined enhancement");
     Check(snapshots == 2, "ordinary snapshots continue after unsupported cross-account enhancement");
+    Check(client.Connection.Notice is not null, "unsupported-account notice remains visible across ordinary snapshots");
     client.Dispose();
     await ordinary.WaitAsync(TimeSpan.FromSeconds(5));
 }
@@ -258,6 +308,16 @@ using (var client = new CollectorClient(launcher.ExistingPath, () => true, launc
     finally { releaseOldCallback.TrySetResult(); }
 }
 
+await CollectionRegression.Run(Check);
+await ExitOverlayRegression.Run(Check);
+OverlayAppearanceRegression.Run(Check);
+await ConnectionDetailsTests.Run(Check);
+Check(StartupRegistration.BuildCommand(@"C:\Some Folder\WinGlance.App.exe", true) == "\"C:\\Some Folder\\WinGlance.App.exe\" --minimized",
+    "silent startup quotes the executable and keeps its argument outside the quotes");
+Check(StartupRegistration.ShouldHideOnLaunch(["--minimized"], true) &&
+    !StartupRegistration.ShouldHideOnLaunch(["--minimized"], false) &&
+    !StartupRegistration.ShouldHideOnLaunch([], true) && !StartupRegistration.ShouldHideOnLaunch(["--minimized-invalid"], true),
+    "silent launch requires the exact flag and a working tray; manual launch remains visible");
 Console.WriteLine($"Passed {passed} App service regression checks.");
 
 internal static class Snapshots

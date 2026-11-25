@@ -33,6 +33,6 @@ public partial class App : Application
         _window = main;
         _instance.Listen(() => main.DispatcherQueue.TryEnqueue(main.ActivateFromAnotherInstance));
         _window.Closed += (_, _) => { _instance?.Dispose(); _instance = null; };
-        _window.Activate();
+        main.ShowInitial(Environment.GetCommandLineArgs().Skip(1));
     }
 }

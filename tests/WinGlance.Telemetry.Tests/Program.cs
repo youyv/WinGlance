@@ -8,6 +8,8 @@ static void Equal(object? actual, object? expected, string test)
     Console.WriteLine("PASS " + test);
 }
 
+DiskCounterAccountingTests.Run(Equal);
+
 var map = new ProcessLifetimeMap();
 var old = new ProcessIdentity(42, 100);
 var next = new ProcessIdentity(42, 200);

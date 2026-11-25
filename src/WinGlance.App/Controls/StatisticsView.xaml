@@ -77,7 +77,11 @@
           <TextBlock x:Name="QualityLabel" Text="只统计 WinGlance 运行期间；退出应用后停止采集。" FontSize="11" Style="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,0,0,8"/>
         </StackPanel>
       </ScrollViewer>
-      <TextBlock x:Name="SaveStatus" Grid.Row="2" Text="每 30 秒自动保存 · 历史保留 7 天" FontSize="11" Style="{StaticResource Muted}" TextTrimming="CharacterEllipsis"/>
+      <StackPanel Grid.Row="2" Spacing="8">
+        <InfoBar x:Name="CollectionNotice" Title="采集提示" IsOpen="False" IsClosable="True" Severity="Warning" CloseButtonClick="CollectionNotice_CloseButtonClick"/>
+        <Grid><TextBlock x:Name="CollectionStatus" FontSize="11" Style="{StaticResource Muted}" TextTrimming="CharacterEllipsis" Margin="0,0,150,0"/><Button x:Name="StatsReconnectButton" Content="恢复普通采集" Click="Reconnect_Click" HorizontalAlignment="Right" FontSize="11" Padding="8,2"/></Grid>
+        <TextBlock x:Name="SaveStatus" Text="每 30 秒自动保存 · 历史保留 7 天" FontSize="11" Style="{StaticResource Muted}" TextTrimming="CharacterEllipsis"/>
+      </StackPanel>
     </Grid>
     <Border x:Name="HistoryDetail" Width="390" HorizontalAlignment="Right" Padding="24" Background="{ThemeResource SolidBackgroundFillColorBaseBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1,0,0,0" Visibility="Collapsed">
       <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Spacing="18">
