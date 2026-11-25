@@ -1,0 +1,95 @@
+<UserControl x:Class="WinGlance.App.Controls.StatisticsView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:WinGlance.App.Controls">
+  <UserControl.Resources>
+    <SolidColorBrush x:Key="ToggleButtonBackgroundChecked" Color="#238E82"/>
+    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPointerOver" Color="#2D9D90"/>
+    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPressed" Color="#207E74"/>
+    <SolidColorBrush x:Key="ToggleButtonForegroundChecked" Color="White"/>
+    <SolidColorBrush x:Key="ToggleButtonForegroundCheckedPointerOver" Color="White"/>
+    <SolidColorBrush x:Key="ToggleButtonForegroundCheckedPressed" Color="White"/>
+  </UserControl.Resources>
+  <Grid>
+    <Grid Padding="28,20,28,12" RowSpacing="14">
+      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+      <Grid>
+        <StackPanel Spacing="4"><TextBlock Text="运行统计" FontSize="30" FontWeight="SemiBold"/><TextBlock x:Name="ObservationLabel" Text="正在读取本地统计…" Style="{StaticResource Muted}" FontSize="12"/></StackPanel>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Spacing="10">
+          <ComboBox x:Name="RangePicker" AutomationProperties.Name="统计时间范围" Width="124" SelectedIndex="0" SelectionChanged="Range_Changed"><ComboBoxItem Content="本次运行"/><ComboBoxItem Content="今日"/><ComboBoxItem Content="近 7 天"/></ComboBox>
+          <Button Content="增强采集" Click="Enhanced_Click"/>
+          <Button x:Name="ResetButton" Content="重置当前统计" Click="Reset_Click"/>
+        </StackPanel>
+      </Grid>
+      <ScrollViewer x:Name="PageScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="0,0,4,0">
+        <StackPanel Spacing="16">
+          <Grid RowSpacing="12" ColumnSpacing="12">
+            <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
+            <Grid.RowDefinitions><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
+            <Border Style="{StaticResource Card}"><StackPanel Spacing="4"><TextBlock Text="网络总流量" Style="{StaticResource Muted}"/><TextBlock x:Name="NetworkTotal" Text="—" Style="{StaticResource Metric}" Foreground="{StaticResource GlanceAccent}"/><TextBlock x:Name="NetworkParts" Text="↓ —    ↑ —" FontSize="12" Typography.NumeralAlignment="Tabular"/><TextBlock x:Name="NetworkCoverage" FontSize="11" Style="{StaticResource Muted}"/></StackPanel></Border>
+            <Border Grid.Column="1" Style="{StaticResource Card}"><StackPanel Spacing="4"><TextBlock Text="磁盘总吞吐" Style="{StaticResource Muted}"/><TextBlock x:Name="DiskTotal" Text="—" Style="{StaticResource Metric}"/><TextBlock x:Name="DiskParts" Text="读取 —    写入 —" FontSize="12" Typography.NumeralAlignment="Tabular"/><TextBlock x:Name="DiskCoverage" FontSize="11" Style="{StaticResource Muted}"/></StackPanel></Border>
+            <Border Grid.Column="2" Style="{StaticResource Card}"><StackPanel Spacing="4"><TextBlock Text="CPU · 平均占用" Style="{StaticResource Muted}"/><TextBlock x:Name="CpuAverage" Text="—" Style="{StaticResource Metric}"/><TextBlock x:Name="CpuPeak" Text="采样峰值 —" FontSize="12" Typography.NumeralAlignment="Tabular"/><TextBlock x:Name="CpuCoverage" FontSize="11" Style="{StaticResource Muted}"/></StackPanel></Border>
+            <Border Grid.Row="1" Style="{StaticResource Card}"><StackPanel Spacing="4"><TextBlock Text="GPU · 平均占用" Style="{StaticResource Muted}"/><TextBlock x:Name="GpuAverage" Text="—" Style="{StaticResource Metric}"/><TextBlock x:Name="GpuPeak" Text="采样峰值 —" FontSize="12" Typography.NumeralAlignment="Tabular"/><TextBlock x:Name="GpuCoverage" FontSize="11" Style="{StaticResource Muted}"/></StackPanel></Border>
+            <Border Grid.Row="1" Grid.Column="1" Style="{StaticResource Card}"><StackPanel Spacing="4"><TextBlock Text="内存 · 平均占用" Style="{StaticResource Muted}"/><TextBlock x:Name="MemoryAverage" Text="—" Style="{StaticResource Metric}"/><TextBlock x:Name="MemoryPeak" Text="采样峰值 —" FontSize="12" Typography.NumeralAlignment="Tabular"/><TextBlock x:Name="MemoryCoverage" FontSize="11" Style="{StaticResource Muted}"/></StackPanel></Border>
+            <Border Grid.Row="1" Grid.Column="2" Style="{StaticResource Card}"><StackPanel Spacing="4"><TextBlock Text="专用显存 · 平均占用" Style="{StaticResource Muted}"/><TextBlock x:Name="VramAverage" Text="—" Style="{StaticResource Metric}"/><TextBlock x:Name="VramPeak" Text="采样峰值 —" FontSize="12" Typography.NumeralAlignment="Tabular"/><TextBlock x:Name="VramCoverage" FontSize="11" Style="{StaticResource Muted}"/></StackPanel></Border>
+          </Grid>
+          <Border Style="{StaticResource Card}">
+            <StackPanel Spacing="8">
+              <Grid><StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center"><TextBlock Text="资源趋势" FontWeight="SemiBold"/><TextBlock x:Name="TrendHint" Text="按时间聚合 · 空白表示未观测" FontSize="11" Style="{StaticResource Muted}" VerticalAlignment="Center"/></StackPanel><ComboBox x:Name="TrendPicker" AutomationProperties.Name="趋势指标" HorizontalAlignment="Right" Width="128" SelectedIndex="0" SelectionChanged="Trend_Changed"><ComboBoxItem Content="网络流量"/><ComboBoxItem Content="磁盘吞吐"/><ComboBoxItem Content="CPU 占用"/><ComboBoxItem Content="GPU 占用"/><ComboBoxItem Content="内存占用"/><ComboBoxItem Content="专用显存"/></ComboBox></Grid>
+              <local:StatisticsChart x:Name="TrendChart" Height="88"/>
+            </StackPanel>
+          </Border>
+          <Grid><TextBox x:Name="StatsSearch" PlaceholderText="搜索应用名称、进程名或路径" Width="320" HorizontalAlignment="Left" TextChanged="Search_Changed"/><ToggleSwitch x:Name="StatsHideSystem" AutomationProperties.Name="统计隐藏系统进程" OnContent="隐藏 Windows 系统进程" OffContent="显示 Windows 系统进程" HorizontalAlignment="Right" Toggled="HideSystem_Toggled"/></Grid>
+          <Grid>
+            <StackPanel Orientation="Horizontal" Spacing="8"><ToggleButton x:Name="OverviewTab" Content="综合消耗" Tag="overview" IsChecked="True" Click="Tab_Click"/><ToggleButton x:Name="NetworkTab" Content="网络流量排行" Tag="network" Click="Tab_Click"/><ToggleButton x:Name="ComputeTab" Content="算力与内存" Tag="compute" Click="Tab_Click"/><ToggleButton x:Name="DiskTab" Content="磁盘读写排行" Tag="disk" Click="Tab_Click"/></StackPanel>
+            <TextBlock x:Name="ApplicationCount" FontSize="11" Style="{StaticResource Muted}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+          </Grid>
+          <TextBlock x:Name="RankingHint" Text="综合视角默认按 CPU 累计耗时排序" Style="{StaticResource Muted}" FontSize="11" TextWrapping="Wrap"/>
+          <Border Style="{StaticResource Card}" Background="{ThemeResource SolidBackgroundFillColorSecondaryBrush}" Padding="0">
+            <Grid>
+              <Grid.RowDefinitions><RowDefinition Height="44"/><RowDefinition Height="330"/></Grid.RowDefinitions>
+              <Grid Padding="18,0,22,0" ColumnSpacing="12" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,0,1">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="2*" MinWidth="190"/><ColumnDefinition Width="1.3*" MinWidth="120"/><ColumnDefinition Width="*" MinWidth="108"/><ColumnDefinition Width="*" MinWidth="108"/><ColumnDefinition Width="*" MinWidth="108"/></Grid.ColumnDefinitions>
+                <Button x:Name="AppHeader" Content="应用" Tag="name" Click="Sort_Click" Background="Transparent" BorderThickness="0" HorizontalAlignment="Left"/>
+                <Button x:Name="FirstHeader" Grid.Column="1" Content="CPU 累计耗时 ↓" Tag="first" Click="Sort_Click" Background="Transparent" BorderThickness="0" HorizontalAlignment="Right"/>
+                <Button x:Name="SecondHeader" Grid.Column="2" Content="网络流量" Tag="second" Click="Sort_Click" Background="Transparent" BorderThickness="0" HorizontalAlignment="Right"/>
+                <Button x:Name="ThirdHeader" Grid.Column="3" Content="磁盘吞吐" Tag="third" Click="Sort_Click" Background="Transparent" BorderThickness="0" HorizontalAlignment="Right"/>
+                <Button x:Name="FourthHeader" Grid.Column="4" Content="内存峰值" Tag="fourth" Click="Sort_Click" Background="Transparent" BorderThickness="0" HorizontalAlignment="Right"/>
+              </Grid>
+              <ListView x:Name="RankingList" AutomationProperties.Name="应用统计排行" Grid.Row="1" Padding="6" SelectionMode="Single" IsItemClickEnabled="True" ItemClick="Application_Click" HorizontalContentAlignment="Stretch" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                <ListView.ItemContainerTransitions><TransitionCollection/></ListView.ItemContainerTransitions>
+                <ListView.ItemContainerStyle><Style TargetType="ListViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,2"/><Setter Property="MinHeight" Value="62"/></Style></ListView.ItemContainerStyle>
+                <ListView.ItemTemplate><DataTemplate>
+                  <Grid Padding="12,9,16,9" ColumnSpacing="12" ToolTipService.ToolTip="{Binding Tooltip}">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="2*" MinWidth="190"/><ColumnDefinition Width="1.3*" MinWidth="120"/><ColumnDefinition Width="*" MinWidth="108"/><ColumnDefinition Width="*" MinWidth="108"/><ColumnDefinition Width="*" MinWidth="108"/></Grid.ColumnDefinitions>
+                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="34"/><ColumnDefinition/></Grid.ColumnDefinitions><Border Width="30" Height="30" CornerRadius="8" Background="{ThemeResource LayerFillColorDefaultBrush}"><Grid><FontIcon Glyph="&#xE737;" FontSize="17" Opacity="0.45"/><Image Source="{Binding Icon}" Width="28" Height="28"/></Grid></Border><StackPanel Grid.Column="1" Margin="10,0,0,0" Spacing="3" VerticalAlignment="Center"><TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="13" TextTrimming="CharacterEllipsis"/><TextBlock Text="{Binding Subtitle}" Style="{StaticResource Muted}" FontSize="11" TextTrimming="CharacterEllipsis"/></StackPanel></Grid>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="4"><TextBlock Text="{Binding First}" Style="{StaticResource Number}"/><TextBlock Text="{Binding FirstHint}" Style="{StaticResource Number}" FontSize="10" Opacity="0.6"/><ProgressBar Value="{Binding Bar}" Maximum="100" Height="3" Foreground="{StaticResource GlanceAccent}"/></StackPanel>
+                    <StackPanel Grid.Column="2" VerticalAlignment="Center" Spacing="4"><TextBlock Text="{Binding Second}" Style="{StaticResource Number}"/><TextBlock Text="{Binding SecondHint}" Style="{StaticResource Number}" FontSize="10" Opacity="0.6"/></StackPanel>
+                    <StackPanel Grid.Column="3" VerticalAlignment="Center" Spacing="4"><TextBlock Text="{Binding Third}" Style="{StaticResource Number}"/><TextBlock Text="{Binding ThirdHint}" Style="{StaticResource Number}" FontSize="10" Opacity="0.6"/></StackPanel>
+                    <StackPanel Grid.Column="4" VerticalAlignment="Center" Spacing="4"><TextBlock Text="{Binding Fourth}" Style="{StaticResource Number}"/><TextBlock Text="{Binding FourthHint}" Style="{StaticResource Number}" FontSize="10" Opacity="0.6"/></StackPanel>
+                  </Grid>
+                </DataTemplate></ListView.ItemTemplate>
+              </ListView>
+              <TextBlock x:Name="EmptyLabel" Grid.Row="1" Text="等待统计数据…" HorizontalAlignment="Center" VerticalAlignment="Center" Style="{StaticResource Muted}"/>
+            </Grid>
+          </Border>
+          <InfoBar x:Name="Notice" IsOpen="False" IsClosable="False" Severity="Informational" Title="统计覆盖"/>
+          <TextBlock x:Name="QualityLabel" Text="只统计 WinGlance 运行期间；退出应用后停止采集。" FontSize="11" Style="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,0,0,8"/>
+        </StackPanel>
+      </ScrollViewer>
+      <TextBlock x:Name="SaveStatus" Grid.Row="2" Text="每 30 秒自动保存 · 历史保留 7 天" FontSize="11" Style="{StaticResource Muted}" TextTrimming="CharacterEllipsis"/>
+    </Grid>
+    <Border x:Name="HistoryDetail" Width="390" HorizontalAlignment="Right" Padding="24" Background="{ThemeResource SolidBackgroundFillColorBaseBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1,0,0,0" Visibility="Collapsed">
+      <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Spacing="18">
+        <Grid><TextBlock Text="应用统计详情" Style="{StaticResource Muted}" VerticalAlignment="Center"/><Button Content="关闭" Click="CloseDetail_Click" HorizontalAlignment="Right"/></Grid>
+        <StackPanel Orientation="Horizontal" Spacing="12"><Image x:Name="DetailIcon" Width="44" Height="44"/><StackPanel Width="260"><TextBlock x:Name="DetailName" FontSize="22" FontWeight="SemiBold" TextWrapping="Wrap"/><TextBlock x:Name="DetailState" FontSize="12" Style="{StaticResource Muted}"/></StackPanel></StackPanel>
+        <TextBlock x:Name="DetailObservation" TextWrapping="Wrap" Style="{StaticResource Muted}" FontSize="12"/>
+        <Border Style="{StaticResource Card}"><StackPanel Spacing="8"><TextBlock Text="CPU · 运行期间平均" Style="{StaticResource Muted}" FontSize="12"/><TextBlock x:Name="DetailCpu" FontSize="24" Typography.NumeralAlignment="Tabular"/><TextBlock x:Name="DetailCpuHint" FontSize="11" Style="{StaticResource Muted}" TextWrapping="Wrap"/><local:StatisticsChart x:Name="DetailChart" Height="90"/></StackPanel></Border>
+        <Border Style="{StaticResource Card}"><TextBlock x:Name="DetailMetrics" FontSize="13" LineHeight="24" TextWrapping="Wrap" Typography.NumeralAlignment="Tabular" IsTextSelectionEnabled="True"/></Border>
+        <TextBlock x:Name="DetailCoverage" FontSize="11" Style="{StaticResource Muted}" TextWrapping="Wrap"/>
+        <TextBlock Text="文件路径" FontWeight="SemiBold" FontSize="12"/><TextBlock x:Name="DetailPath" TextWrapping="Wrap" IsTextSelectionEnabled="True" Style="{StaticResource Muted}" FontSize="12"/>
+        <TextBlock x:Name="DetailIdentity" TextWrapping="Wrap" Style="{StaticResource Muted}" FontSize="11"/>
+      </StackPanel></ScrollViewer>
+    </Border>
+  </Grid>
+</UserControl>

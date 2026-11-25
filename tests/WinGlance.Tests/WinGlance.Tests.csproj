@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/WinGlance.Core/WinGlance.Core.csproj" />
+    <Compile Include="../../src/WinGlance.Windows/Identity/*.cs" Link="Identity/%(Filename)%(Extension)" />
+    <Compile Include="../../src/WinGlance.App/Services/NativeDesktop.cs" Link="NativeDesktop.cs" />
+  </ItemGroup>
+</Project>

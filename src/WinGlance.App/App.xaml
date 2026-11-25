@@ -1,0 +1,22 @@
+<Application x:Class="WinGlance.App.App"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Application.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.MergedDictionaries>
+        <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+      </ResourceDictionary.MergedDictionaries>
+      <SolidColorBrush x:Key="GlanceAccent" Color="#36A99B" />
+      <Style x:Key="Card" TargetType="Border">
+        <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+        <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="12" />
+        <Setter Property="Padding" Value="18,14" />
+      </Style>
+      <Style x:Key="Muted" TargetType="TextBlock"><Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" /></Style>
+      <Style x:Key="Metric" TargetType="TextBlock"><Setter Property="FontSize" Value="28" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="Typography.NumeralAlignment" Value="Tabular" /></Style>
+      <Style x:Key="Number" TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right" /><Setter Property="FontSize" Value="13" /><Setter Property="Typography.NumeralAlignment" Value="Tabular" /></Style>
+    </ResourceDictionary>
+  </Application.Resources>
+</Application>

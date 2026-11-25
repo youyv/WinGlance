@@ -1,0 +1,25 @@
+.tools/
+**/bin/
+**/obj/
+artifacts/
+.vs/
+*.user
+*.log
+
+# Local editor state and generated runtime data
+.idea/
+*.suo
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+StatisticsIcons/
+
+# Local credentials and environment overrides
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.key

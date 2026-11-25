@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/WinGlance.App/WinGlance.App.csproj" />
+    <Project Path="src/WinGlance.Collector/WinGlance.Collector.csproj" />
+    <Project Path="src/WinGlance.Core/WinGlance.Core.csproj" />
+    <Project Path="src/WinGlance.Statistics/WinGlance.Statistics.csproj" />
+    <Project Path="src/WinGlance.Windows/WinGlance.Windows.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/WinGlance.Telemetry.Tests/WinGlance.Telemetry.Tests.csproj" />
+    <Project Path="tests/WinGlance.Tests/WinGlance.Tests.csproj" />
+    <Project Path="tests/WinGlance.Statistics.Tests/WinGlance.Statistics.Tests.csproj" />
+  </Folder>
+</Solution>
