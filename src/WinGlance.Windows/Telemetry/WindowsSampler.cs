@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
@@ -19,9 +18,7 @@ public sealed partial class WindowsSampler : IDisposable
     private readonly int _processorCount;
     private Dictionary<ProcessIdentity, (long CpuTicks, long SampleTimestamp)> _cpuTimes = [];
     private HashSet<ProcessIdentity> _knownIdentities = [];
-    private Dictionary<string, (long Receive, long Send)> _networkBytes = [];
     private long _lastTimestamp;
-    private long _lastNetworkTimestamp;
     private (ulong Idle, ulong Kernel, ulong User)? _systemTimes;
     private string? _selectedNetwork;
     private bool _disposed;
@@ -125,7 +122,8 @@ public sealed partial class WindowsSampler : IDisposable
         var memory = new MemoryStatus { Length = (uint)Marshal.SizeOf<MemoryStatus>() };
         bool memoryReady = GlobalMemoryStatusEx(ref memory);
         var memoryAccounting = ReadMemoryAccounting(memoryReady, memory.TotalPhysical, memory.AvailablePhysical, resetAccounting);
-        var network = SampleNetwork();
+        var networkAccounting = _physicalNetwork.Sample(resetAccounting);
+        var network = SampleNetwork(networkAccounting);
         var capabilities = new Dictionary<string, Capability>
         {
             ["cpu"] = new(hasInterval ? MetricState.Ready : MetricState.WarmingUp,
@@ -147,66 +145,36 @@ public sealed partial class WindowsSampler : IDisposable
         return new MonitorSnapshot(DateTimeOffset.Now, interval,
             new SystemSample(systemCpu, memoryReady ? (long)memory.TotalPhysical : 0,
                 memoryReady ? (long)memory.AvailablePhysical : 0, network.Download, network.Upload,
-                pdh.DiskRead, pdh.DiskWrite, pdh.GpuPercent, network.Name), processes, capabilities, _elevated)
+                pdh.DiskRead, pdh.DiskWrite, pdh.GpuPercent, network.Name)
+            {
+                NetworkInterfaces = network.Interfaces,
+                DefaultNetworkInterfaceId = network.Id,
+                PhysicalDisks = pdh.Accounting?.PhysicalDisks ?? []
+            }, processes, capabilities, _elevated)
         {
             Accounting = BuildAccounting(processes, previousIdentities, cpuAccounting, drained, pdh,
-                memoryAccounting, memoryReady ? (long)memory.TotalPhysical : null, resetAccounting)
+                memoryAccounting, memoryReady ? (long)memory.TotalPhysical : null, networkAccounting, resetAccounting)
         };
     }
 
-    private NetworkSample SampleNetwork()
+    private NetworkSample SampleNetwork(NetworkAccountingSample sampled)
     {
-        long now = Stopwatch.GetTimestamp();
-        double interval = _lastNetworkTimestamp == 0 ? 0 : (now - _lastNetworkTimestamp) / (double)Stopwatch.Frequency;
-        _lastNetworkTimestamp = now;
-        var counters = new Dictionary<string, (long Receive, long Send)>();
-        var candidates = new List<(NetworkInterface Nic, double? Download, double? Upload, bool Physical)>();
-        try
-        {
-            foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
-            {
-                if (nic.OperationalStatus != OperationalStatus.Up || nic.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
-                try
-                {
-                    var stat = nic.GetIPStatistics();
-                    counters[nic.Id] = (stat.BytesReceived, stat.BytesSent);
-                    double? down = null, up = null;
-                    if (interval > 0.001 && _networkBytes.TryGetValue(nic.Id, out var previous))
-                    {
-                        down = Math.Max(0, stat.BytesReceived - previous.Receive) / interval;
-                        up = Math.Max(0, stat.BytesSent - previous.Send) / interval;
-                    }
-                    bool physical = IsPhysicalInterface(nic);
-                    candidates.Add((nic, down, up, physical));
-                }
-                catch (Exception ex) when (ex is NetworkInformationException or InvalidOperationException) { }
-            }
-        }
-        catch (NetworkInformationException)
-        {
-            return new NetworkSample(null, null, "网卡不可用", new(MetricState.Error, "无法读取网络接口计数器"));
-        }
-        _networkBytes = counters;
-        var physicalCandidates = candidates.Where(x => x.Physical).ToList();
+        var interfaces = sampled.Devices;
+        var candidates = interfaces.Where(x => x.IsConnected).ToList();
+        var physicalCandidates = candidates.Where(x => x.IsPhysical).ToList();
         var eligible = physicalCandidates.Count > 0 ? physicalCandidates : candidates;
         if (eligible.Count == 0)
-            return new NetworkSample(null, null, "无活动网络", new(MetricState.Unsupported, "没有活动网络接口"));
-        var best = eligible.OrderByDescending(x => (x.Download ?? 0) + (x.Upload ?? 0)).First();
-        var old = eligible.FirstOrDefault(x => x.Nic.Id == _selectedNetwork);
+            return new NetworkSample(null, null, "无活动网络",
+                new(sampled.Download.State == MetricState.Error ? MetricState.Error : MetricState.Unsupported,
+                    sampled.Download.State == MetricState.Error ? "无法读取网络接口计数器" : "没有活动网络接口"), interfaces);
+        var best = eligible.OrderByDescending(x => (x.DownloadBytesPerSecond ?? 0) + (x.UploadBytesPerSecond ?? 0)).First();
+        var old = eligible.FirstOrDefault(x => x.Id == _selectedNetwork);
         // Small traffic variations should not make the selected interface oscillate every second.
-        if (old.Nic is not null && (best.Download ?? 0) + (best.Upload ?? 0) < Math.Max(4096, ((old.Download ?? 0) + (old.Upload ?? 0)) * 1.25)) best = old;
-        _selectedNetwork = best.Nic.Id;
-        return new NetworkSample(best.Download, best.Upload, best.Nic.Name,
-            new(best.Download.HasValue ? MetricState.Ready : MetricState.WarmingUp,
-                $"单接口：{best.Nic.Description}；优先活动物理网卡，不叠加 VPN/虚拟网卡"));
-    }
-
-    private static bool IsPhysicalInterface(NetworkInterface nic)
-    {
-        if (nic.NetworkInterfaceType is not (NetworkInterfaceType.Ethernet or NetworkInterfaceType.Wireless80211 or NetworkInterfaceType.GigabitEthernet or NetworkInterfaceType.FastEthernetFx or NetworkInterfaceType.FastEthernetT)) return false;
-        // Drivers can label virtual adapters as Ethernet. This conservative fallback avoids common duplicates.
-        string description = nic.Description.ToLowerInvariant();
-        return !new[] { "virtual", "vpn", "hyper-v", "vmware", "virtualbox", "tap-", "tunnel", "wireguard", "tailscale" }.Any(description.Contains);
+        if (old is not null && (best.DownloadBytesPerSecond ?? 0) + (best.UploadBytesPerSecond ?? 0) <
+            Math.Max(4096, ((old.DownloadBytesPerSecond ?? 0) + (old.UploadBytesPerSecond ?? 0)) * 1.25)) best = old;
+        _selectedNetwork = best.Id;
+        return new NetworkSample(best.DownloadBytesPerSecond, best.UploadBytesPerSecond, best.Name,
+            new(best.State, $"单接口：{best.Detail}；优先活动物理网卡，不叠加 VPN/虚拟网卡"), interfaces, best.Id);
     }
 
     private double? ReadSystemCpu(bool resetAccounting)
@@ -267,7 +235,8 @@ public sealed partial class WindowsSampler : IDisposable
         _cpuHandles.Clear();
     }
 
-    private sealed record NetworkSample(double? Download, double? Upload, string Name, Capability Capability);
+    private sealed record NetworkSample(double? Download, double? Upload, string Name, Capability Capability,
+        IReadOnlyList<NetworkInterfaceSample> Interfaces, string? Id = null);
     [StructLayout(LayoutKind.Sequential)] private struct MemoryStatus
     {
         public uint Length, MemoryLoad;

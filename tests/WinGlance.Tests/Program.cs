@@ -53,6 +53,24 @@ Check(IdentityPolicy.Classify("svchost", @"C:\Windows-old\System32\svchost.exe",
 Check(IdentityPolicy.Classify("securityservice", @"C:\Security\service.exe", @"C:\Windows", isService: true).Category == SoftwareCategory.ThirdPartyService, "Third-party services must stay visible.");
 Check(IdentityPolicy.Classify("unknown", null, @"C:\Windows").Category == SoftwareCategory.Unknown, "Inaccessible process metadata must not be hidden.");
 
+var catalogs = new CatalogFixture([null, (true, "Microsoft Windows"), (true, "Unused")]);
+var catalogPublisher = CatalogTrustSearch.Find(catalogs.Next, catalogs.Verify, catalogs.Release);
+Check(catalogPublisher?.MicrosoftVerified == true && catalogPublisher?.Publisher == "Microsoft Windows" && catalogs.Visited.SequenceEqual(new nint[] { 1, 2 }),
+    "Catalog lookup must continue after the first candidate fails verification.");
+Check(catalogs.Consumed.SequenceEqual(new nint[] { 1 }) && catalogs.Released.SequenceEqual(new nint[] { 2 }) && catalogs.Owned.Count == 0,
+    "Catalog advancement consumes the previous context; early success must release only its remaining context.");
+catalogs = new CatalogFixture([null, null]);
+Check(CatalogTrustSearch.Find(catalogs.Next, catalogs.Verify, catalogs.Release) is null && catalogs.Owned.Count == 0 && catalogs.Released.Count == 0,
+    "Catalog exhaustion must not double release contexts consumed by enumeration.");
+catalogs = new CatalogFixture([(false, "Other publisher"), (true, "Microsoft Windows")]);
+Check(CatalogTrustSearch.Find(catalogs.Next, catalogs.Verify, catalogs.Release)?.MicrosoftVerified == true,
+    "A trusted non-Microsoft catalog must not hide a later trusted Microsoft catalog.");
+catalogs = new CatalogFixture([null]) { ThrowOnVerify = true };
+try { CatalogTrustSearch.Find(catalogs.Next, catalogs.Verify, catalogs.Release); }
+catch (InvalidDataException) { }
+Check(catalogs.Released.SequenceEqual(new nint[] { 1 }) && catalogs.Owned.Count == 0,
+    "An exception during catalog verification must release the current context.");
+
 var history = new HistoryBuffer();
 var begin = new DateTimeOffset(2026, 11, 25, 0, 0, 0, TimeSpan.Zero);
 history.Add(begin, [aggregate]);
@@ -71,6 +89,13 @@ history.Add(begin.AddSeconds(124), []);
 history.Add(begin.AddSeconds(125), [aggregate]);
 Check(history.Get("browser").Count == 3 && history.Get("browser")[1].CpuPercent is null, "An application absent from a snapshot must leave a gap even when it reappears quickly.");
 Console.WriteLine($"PASS: {checks} regression checks.");
+
+if (args.Contains("--signature-smoke") && OperatingSystem.IsWindows())
+{
+    var verified = AuthenticodeVerifier.Verify(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "svchost.exe"));
+    Check(verified.MicrosoftVerified, "A known installed Windows catalog-signed component must verify.");
+    Console.WriteLine($"SIGNATURE PASS: {verified.Publisher}");
+}
 
 if (args.Contains("--windows-smoke") && OperatingSystem.IsWindows())
 {
@@ -189,4 +214,36 @@ sealed class TestTimeProvider(DateTimeOffset now) : TimeProvider
     private DateTimeOffset _now = now;
     public override DateTimeOffset GetUtcNow() => _now;
     public void Advance(TimeSpan interval) => _now += interval;
+}
+
+sealed class CatalogFixture(IReadOnlyList<(bool MicrosoftVerified, string? Publisher)?> candidates)
+{
+    public HashSet<nint> Owned { get; } = [];
+    public List<nint> Visited { get; } = [];
+    public List<nint> Consumed { get; } = [];
+    public List<nint> Released { get; } = [];
+    public bool ThrowOnVerify { get; init; }
+    public nint Next(nint previous)
+    {
+        if (previous != 0)
+        {
+            if (!Owned.Remove(previous)) throw new InvalidOperationException("Invalid/double-released enumeration context.");
+            Consumed.Add(previous);
+        }
+        nint next = previous + 1;
+        if (next > candidates.Count) return 0;
+        Owned.Add(next);
+        return next;
+    }
+    public (bool MicrosoftVerified, string? Publisher)? Verify(nint catalog)
+    {
+        Visited.Add(catalog);
+        if (ThrowOnVerify) throw new InvalidDataException("Controlled verification failure.");
+        return candidates[(int)catalog - 1];
+    }
+    public void Release(nint catalog)
+    {
+        if (!Owned.Remove(catalog)) throw new InvalidOperationException("Invalid/double release.");
+        Released.Add(catalog);
+    }
 }

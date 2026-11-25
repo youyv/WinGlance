@@ -17,7 +17,7 @@
         <StackPanel Spacing="4"><TextBlock Text="运行统计" FontSize="30" FontWeight="SemiBold"/><TextBlock x:Name="ObservationLabel" Text="正在读取本地统计…" Style="{StaticResource Muted}" FontSize="12"/></StackPanel>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Spacing="10">
           <ComboBox x:Name="RangePicker" AutomationProperties.Name="统计时间范围" Width="124" SelectedIndex="0" SelectionChanged="Range_Changed"><ComboBoxItem Content="本次运行"/><ComboBoxItem Content="今日"/><ComboBoxItem Content="近 7 天"/></ComboBox>
-          <Button Content="增强采集" Click="Enhanced_Click"/>
+          <Button x:Name="StatsEnhancedButton" Content="增强采集" Click="Enhanced_Click"/>
           <Button x:Name="ResetButton" Content="重置当前统计" Click="Reset_Click"/>
         </StackPanel>
       </Grid>

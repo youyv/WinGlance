@@ -8,6 +8,7 @@ namespace WinGlance.Statistics;
 public sealed partial class StatisticsService
 {
     private DateTimeOffset _nextCatalogCleanup = DateTimeOffset.MinValue;
+    private bool _catalogNeedsCleanup, _retryIconCleanup;
     private void Initialize()
     {
         Directory.CreateDirectory(Path.GetDirectoryName(_databasePath)!);
@@ -42,6 +43,8 @@ public sealed partial class StatisticsService
             while (reader.Read()) _coverageEnds[(reader.GetString(0), (StatisticMetric)reader.GetInt32(1))] = reader.GetInt64(2);
         _lastRecorded = ReadDate("lastRecorded"); _lastSaved = ReadDate("lastSaved"); _lastReset = ReadDate("lastReset");
         _resetCutoff = ReadDate("resetCutoff") ?? DateTimeOffset.MinValue;
+        // A crash or a sharing violation can leave an icon after its catalog row was removed.
+        CleanupOrphanIcons();
     }
 
     private void Flush()
@@ -55,7 +58,13 @@ public sealed partial class StatisticsService
             VALUES($session,$day,$kind,$start,$finish,$entity,$json)
             ON CONFLICT(session,day,kind,start,entity) DO UPDATE SET finish=excluded.finish,json=excluded.json
             """, transaction);
-        foreach (var item in _pending.Values) MergeStored(item, transaction, bucketRead, bucketWrite);
+        // Publish cached totals only after commit, so a rollback can retry the same pending deltas.
+        var committed = new List<StoredBucket>(Math.Min(_pending.Count, StoredReadCacheLimit));
+        foreach (var item in _pending.Values)
+        {
+            var merged = MergeStored(item, transaction, bucketRead, bucketWrite);
+            if (committed.Count < StoredReadCacheLimit) committed.Add(merged);
+        }
         using (var command = Command("INSERT INTO applications(id,json) VALUES($id,$json) ON CONFLICT(id) DO UPDATE SET json=excluded.json", transaction))
         {
             var idParameter = command.Parameters.Add("$id", SqliteType.Text);
@@ -74,24 +83,33 @@ public sealed partial class StatisticsService
             var metric = command.Parameters.Add("$metric", SqliteType.Integer);
             var finish = command.Parameters.Add("$finish", SqliteType.Integer);
             command.Prepare();
-            foreach (var (key, end) in _coverageEnds)
-            { entity.Value = key.Entity; metric.Value = (int)key.Metric; finish.Value = end; command.ExecuteNonQuery(); }
+            foreach (var key in _dirtyCoverage)
+            { entity.Value = key.Entity; metric.Value = (int)key.Metric; finish.Value = _coverageEnds[key]; command.ExecuteNonQuery(); }
         }
         SetMeta("lastRecorded", _lastRecorded?.UtcTicks.ToString(CultureInfo.InvariantCulture) ?? "", transaction);
         SetMeta("lastSaved", saved.UtcTicks.ToString(CultureInfo.InvariantCulture), transaction);
         Compact(transaction, saved);
+        bool cleanCatalog = _catalogNeedsCleanup || saved >= _nextCatalogCleanup;
+        var removed = cleanCatalog ? PruneCatalog(transaction) : [];
         transaction.Commit();
-        _pending.Clear(); _changedApplications.Clear(); _lastSaved = saved; _storageWarning = null;
-        _dayReadCache.Clear(); _queryCache.Clear();
-        CleanupCatalog(saved);
+        _pending.Clear(); _changedApplications.Clear(); _dirtyCoverage.Clear(); _lastSaved = saved; _storageWarning = null;
+        _storedReadCache.Clear(); _queryCache.Clear();
+        long cutoff = saved.AddHours(-24).UtcTicks / TimeSpan.TicksPerHour * TimeSpan.TicksPerHour;
+        string oldest = LocalDate(saved).AddDays(-6).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        foreach (var item in committed)
+            if (!(item.Key.Kind == 300 && item.End <= cutoff) &&
+                !(string.CompareOrdinal(item.Key.Day, oldest) < 0 && (item.Key.Kind > 0 || item.Key.Session != _sessionKey)))
+                _storedReadCache[item.Key] = item;
+        if (cleanCatalog) CompleteCatalogCleanup(removed, saved);
+        else if (_retryIconCleanup) CleanupOrphanIcons();
     }
 
-    private void MergeStored(StoredBucket item, SqliteTransaction transaction, SqliteCommand? sharedRead = null, SqliteCommand? sharedWrite = null)
+    private StoredBucket MergeStored(StoredBucket item, SqliteTransaction transaction, SqliteCommand? sharedRead = null, SqliteCommand? sharedWrite = null)
     {
         var merged = new BucketData();
         using var ownedRead = sharedRead is null ? Command("SELECT json FROM buckets WHERE session=$session AND day=$day AND kind=$kind AND start=$start AND entity=$entity", transaction) : null;
         var read = sharedRead ?? ownedRead!;
-        if (item.Key.Kind == 0 && _dayReadCache.TryGetValue(item.Key, out var cached)) merged.Merge(cached.Data);
+        if (_storedReadCache.TryGetValue(item.Key, out var cached)) merged.Merge(cached.Data);
         else
         {
             BindKey(read, item.Key);
@@ -106,6 +124,7 @@ public sealed partial class StatisticsService
         var write = sharedWrite ?? ownedWrite!;
         BindKey(write, item.Key); Parameter(write, "$finish", item.End);
         Parameter(write, "$json", JsonSerializer.Serialize(merged, StatisticsJsonContext.Default.BucketData)); write.ExecuteNonQuery();
+        return new(item.Key, item.End, merged);
     }
 
     private void Compact(SqliteTransaction transaction, DateTimeOffset now)
@@ -132,35 +151,58 @@ public sealed partial class StatisticsService
         {
             delete.Parameters.AddWithValue("$oldest", oldest); delete.Parameters.AddWithValue("$session", _sessionId.ToString("N")); delete.ExecuteNonQuery();
         }
-        // Catalog entries outlive processes, but not all retained data: avoid an unbounded list of historical host PIDs.
-        if (now >= _nextCatalogCleanup)
-        {
-            using (var delete = Command("DELETE FROM applications WHERE id NOT IN (SELECT DISTINCT entity FROM buckets WHERE entity<>'@system')", transaction)) delete.ExecuteNonQuery();
-            using (var delete = Command("DELETE FROM coverage WHERE entity NOT IN (SELECT id FROM applications)", transaction)) delete.ExecuteNonQuery();
-        }
     }
 
-    private void CleanupCatalog(DateTimeOffset now)
+    private List<string> PruneCatalog(SqliteTransaction transaction)
     {
-        if (now < _nextCatalogCleanup) return;
-        _nextCatalogCleanup = now.AddDays(1);
-        var retained = new HashSet<string>();
-        using (var command = Command("SELECT id FROM applications"))
-        using (var reader = command.ExecuteReader()) while (reader.Read()) retained.Add(reader.GetString(0));
-        foreach (var id in _applications.Keys.Where(id => !retained.Contains(id) && !_running.Contains(id)).ToArray())
+        var removed = new List<string>();
+        using (var command = Command("SELECT id FROM applications WHERE id NOT IN (SELECT DISTINCT entity FROM buckets WHERE entity<>'@system')", transaction))
+        using (var reader = command.ExecuteReader())
+            while (reader.Read()) if (!_running.Contains(reader.GetString(0))) removed.Add(reader.GetString(0));
+        using var delete = Command("DELETE FROM applications WHERE id=$id; DELETE FROM coverage WHERE entity=$id", transaction);
+        var idParameter = delete.Parameters.Add("$id", SqliteType.Text);
+        foreach (var id in removed) { idParameter.Value = id; delete.ExecuteNonQuery(); }
+        return removed;
+    }
+
+    private void CompleteCatalogCleanup(IEnumerable<string> removed, DateTimeOffset now)
+    {
+        foreach (var id in removed)
         {
-            var icon = _applications[id].Software.IconPath;
             _applications.Remove(id); _iconChecks.Remove(id);
-            foreach (var key in _coverageEnds.Keys.Where(key => key.Entity == id).ToArray()) _coverageEnds.Remove(key);
-            if (icon is null) continue;
-            var directory = Path.Combine(Path.GetDirectoryName(_databasePath)!, "StatisticsIcons") + Path.DirectorySeparatorChar;
-            try
-            {
-                string full = Path.GetFullPath(icon);
-                if (full.StartsWith(directory, StringComparison.OrdinalIgnoreCase)) File.Delete(full);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { }
+            _changedApplications.Remove(id);
+            foreach (var key in _coverageEnds.Keys.Where(key => key.Entity == id).ToArray())
+            { _coverageEnds.Remove(key); _dirtyCoverage.Remove(key); }
         }
+        _catalogNeedsCleanup = false;
+        _nextCatalogCleanup = now.AddDays(1);
+        CleanupOrphanIcons();
+    }
+
+    private void CleanupOrphanIcons()
+    {
+        _retryIconCleanup = false;
+        var directory = Path.Combine(Path.GetDirectoryName(_databasePath)!, "StatisticsIcons");
+        try
+        {
+            if (!Directory.Exists(directory)) return;
+            // This cache owns only its SHA-256-named PNGs; never traverse a junction or another directory.
+            if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0) return;
+            var retained = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var entry in _applications.Values)
+                if (entry.Software.IconPath is { } icon) retained.Add(Path.GetFullPath(icon));
+            foreach (var icon in Directory.EnumerateFiles(directory, "*.png", SearchOption.TopDirectoryOnly))
+            {
+                string name = Path.GetFileNameWithoutExtension(icon);
+                if (name.Length != 64 || !name.All(char.IsAsciiHexDigit) || retained.Contains(Path.GetFullPath(icon))) continue;
+                try
+                {
+                    if ((File.GetAttributes(icon) & FileAttributes.ReparsePoint) == 0) File.Delete(icon);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { _retryIconCleanup = true; }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { _retryIconCleanup = true; }
     }
 
     private StatisticsSnapshot Query(StatisticsRange range)
@@ -225,10 +267,10 @@ public sealed partial class StatisticsService
             while (reader.Read())
             {
                 var key = new BucketKey(reader.GetString(0), reader.GetString(1), reader.GetInt32(2), reader.GetInt64(3), reader.GetString(5));
-                if (!days || !_dayReadCache.TryGetValue(key, out var item))
+                if (!_storedReadCache.TryGetValue(key, out var item))
                 {
                     item = new(key, reader.GetInt64(4), JsonSerializer.Deserialize(reader.GetString(6), StatisticsJsonContext.Default.BucketData) ?? new());
-                    if (days && _dayReadCache.Count < 4096) _dayReadCache[key] = item;
+                    if (_storedReadCache.Count < StoredReadCacheLimit) _storedReadCache[key] = item;
                 }
                 items[item.Key] = item;
             }
@@ -264,12 +306,14 @@ public sealed partial class StatisticsService
         SetMeta("resetCutoff", now.UtcTicks.ToString(CultureInfo.InvariantCulture), transaction);
         SetMeta("lastRecorded", "", transaction);
         using (var clear = Command("DELETE FROM coverage", transaction)) clear.ExecuteNonQuery();
+        var removed = PruneCatalog(transaction);
         transaction.Commit();
         foreach (var key in _pending.Keys.Where(key => InRange(key, range, first, last)).ToArray()) _pending.Remove(key);
         _lastReset = now; _resetCutoff = now;
         _lastRecorded = null;
-        _coverageEnds.Clear();
-        _dayReadCache.Clear(); _queryCache.Clear();
+        _coverageEnds.Clear(); _dirtyCoverage.Clear();
+        _storedReadCache.Clear(); _queryCache.Clear();
+        CompleteCatalogCleanup(removed, now);
     }
 
     private bool InRange(BucketKey key, StatisticsRange range, string first, string last) =>

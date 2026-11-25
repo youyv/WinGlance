@@ -18,6 +18,7 @@ internal static class AuthenticodeVerifier
             if (VerifyObject(file, 1)) return Publisher(path);
             // Most Windows components are catalog signed rather than embedded signed.
             using var input = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            (bool MicrosoftVerified, string? Publisher)? fallback = null;
             foreach (var algorithm in new[] { "SHA256", "SHA1" })
             {
                 if (!CryptCATAdminAcquireContext2(out var admin, IntPtr.Zero, algorithm, IntPtr.Zero, 0)) continue;
@@ -27,18 +28,17 @@ internal static class AuthenticodeVerifier
                     if (!CryptCATAdminCalcHashFromFileHandle2(admin, input, ref length, null, 0) || length is 0 or > 128) continue;
                     var hash = new byte[length];
                     if (!CryptCATAdminCalcHashFromFileHandle2(admin, input, ref length, hash, 0)) continue;
-                    IntPtr previous = IntPtr.Zero;
-                    var catalog = CryptCATAdminEnumCatalogFromHash(admin, hash, length, 0, ref previous);
-                    if (catalog == IntPtr.Zero) continue;
+                    using var memberTag = new NativeString(Convert.ToHexString(hash));
+                    var pinnedHash = GCHandle.Alloc(hash, GCHandleType.Pinned);
                     try
                     {
-                        var info = new CatalogInfo { Size = (uint)Marshal.SizeOf<CatalogInfo>(), CatalogFile = "" };
-                        if (!CryptCATCatalogInfoFromContext(catalog, ref info, 0)) continue;
-                        using var catalogName = new NativeString(info.CatalogFile);
-                        using var memberTag = new NativeString(Convert.ToHexString(hash));
-                        var pinnedHash = GCHandle.Alloc(hash, GCHandleType.Pinned);
-                        try
+                        var result = CatalogTrustSearch.Find(
+                            previous => CryptCATAdminEnumCatalogFromHash(admin, hash, length, 0, ref previous),
+                            catalog =>
                         {
+                            var info = new CatalogInfo { Size = (uint)Marshal.SizeOf<CatalogInfo>(), CatalogFile = "" };
+                            if (!CryptCATCatalogInfoFromContext(catalog, ref info, 0)) return null;
+                            using var catalogName = new NativeString(info.CatalogFile);
                             var member = new CatalogMember
                             {
                                 Size = (uint)Marshal.SizeOf<CatalogMember>(), CatalogFile = catalogName.Pointer,
@@ -46,14 +46,19 @@ internal static class AuthenticodeVerifier
                                 MemberFile = input.DangerousGetHandle(), CalculatedFileHash = pinnedHash.AddrOfPinnedObject(),
                                 CalculatedFileHashSize = length, CatAdmin = admin
                             };
-                            if (VerifyObject(member, 2)) return Publisher(info.CatalogFile);
-                        }
-                        finally { pinnedHash.Free(); }
+                            if (!VerifyObject(member, 2)) return null;
+                            try { return Publisher(info.CatalogFile); }
+                            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
+                            { return null; }
+                        }, catalog => CryptCATAdminReleaseCatalogContext(admin, catalog, 0));
+                        if (result is { MicrosoftVerified: true } trusted) return trusted;
+                        fallback ??= result;
                     }
-                    finally { CryptCATAdminReleaseCatalogContext(admin, catalog, 0); }
+                    finally { pinnedHash.Free(); }
                 }
                 finally { CryptCATAdminReleaseContext(admin, 0); }
             }
+            if (fallback is { } publisher) return publisher;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException) { }
         return (false, null);
@@ -62,7 +67,8 @@ internal static class AuthenticodeVerifier
     private static (bool MicrosoftVerified, string? Publisher) Publisher(string signedFile)
     {
 #pragma warning disable SYSLIB0057
-        using var certificate = new X509Certificate2(X509Certificate.CreateFromSignedFile(signedFile));
+        using var signedCertificate = X509Certificate.CreateFromSignedFile(signedFile);
+        using var certificate = new X509Certificate2(signedCertificate);
 #pragma warning restore SYSLIB0057
         var publisher = certificate.GetNameInfo(X509NameType.SimpleName, false);
         // The certificate is read only after WinVerifyTrust validated the signed object.

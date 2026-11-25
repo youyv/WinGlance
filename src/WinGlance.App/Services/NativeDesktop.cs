@@ -14,6 +14,9 @@ public sealed class TrayIcon : IDisposable
     public Action? ShowRequested { get; set; }
     public Action? OverlayRequested { get; set; }
     public Action? ExitRequested { get; set; }
+    public Action? SessionQuery { get; set; }
+    public Action<bool>? SessionEnd { get; set; }
+    public Action? DisplayChanged { get; set; }
     public bool IsAvailable { get; private set; }
     private readonly uint _taskbarCreated;
     private readonly nint _ownedIcon;
@@ -36,6 +39,9 @@ public sealed class TrayIcon : IDisposable
     }
     private nint WndProc(nint hwnd, uint msg, nuint w, nint l, nuint id, nuint data)
     {
+        if (msg == 0x0011) { SessionQuery?.Invoke(); return 1; } // WM_QUERYENDSESSION: allow shutdown
+        if (msg == 0x0016) { SessionEnd?.Invoke(w != 0); return 0; } // WM_ENDSESSION, including cancellation
+        if (msg is 0x007E or 0x001A) DisplayChanged?.Invoke(); // display/work-area changes
         if (msg == _taskbarCreated) IsAvailable = Shell_NotifyIcon(0, ref _data);
         if (msg == 0x8001)
         {

@@ -16,7 +16,12 @@ public sealed record ProcessSample(
 public sealed record SystemSample(double? CpuPercent, long TotalMemoryBytes, long AvailableMemoryBytes,
     double? DownloadBytesPerSecond, double? UploadBytesPerSecond,
     double? DiskReadBytesPerSecond, double? DiskWriteBytesPerSecond, double? GpuPercent,
-    string NetworkInterface);
+    string NetworkInterface)
+{
+    public IReadOnlyList<NetworkInterfaceSample> NetworkInterfaces { get; init; } = [];
+    public IReadOnlyList<PhysicalDiskSample> PhysicalDisks { get; init; } = [];
+    public string? DefaultNetworkInterfaceId { get; init; }
+}
 public sealed record MonitorSnapshot(DateTimeOffset Timestamp, double IntervalSeconds,
     SystemSample System, IReadOnlyList<ProcessSample> Processes,
     IReadOnlyDictionary<string, Capability> Capabilities, bool IsElevated)

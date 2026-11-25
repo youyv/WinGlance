@@ -107,7 +107,7 @@ public sealed partial class WindowsSampler
 
     private AccountingFrame BuildAccounting(IReadOnlyList<ProcessSample> live, HashSet<ProcessIdentity> previousIdentities,
         Dictionary<ProcessIdentity, MetricAccounting> cpu, TrafficDrain traffic, PdhSnapshot pdh,
-        MetricAccounting memory, long? totalMemory, bool reset)
+        MetricAccounting memory, long? totalMemory, NetworkAccountingSample network, bool reset)
     {
         long now = Stopwatch.GetTimestamp();
         var endUtc = DateTimeOffset.UtcNow;
@@ -116,7 +116,6 @@ public sealed partial class WindowsSampler
         _previousFrameTimestamp = now;
         _previousFrameUtc = endUtc;
         var pdhAccounting = pdh.Accounting!;
-        var network = _physicalNetwork.Sample(reset);
         var samples = live.Where(x => x.Identity.StartTimeUtcTicks > 0).ToDictionary(x => x.Identity);
         var endedInFrame = traffic.Processes.Where(x => x.Value.ExitUtcTicks is { } exited &&
             exited > startUtc.UtcTicks && x.Key.StartTimeUtcTicks < endUtc.UtcTicks).Select(x => x.Key);

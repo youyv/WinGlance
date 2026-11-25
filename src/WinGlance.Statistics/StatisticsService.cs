@@ -22,15 +22,18 @@ public sealed partial class StatisticsService : IAsyncDisposable
     private readonly CancellationTokenSource _timerStop = new();
     private readonly Task _worker, _timer;
     private readonly Dictionary<BucketKey, StoredBucket> _pending = [];
-    private readonly Dictionary<BucketKey, StoredBucket> _dayReadCache = [];
+    private readonly Dictionary<BucketKey, StoredBucket> _storedReadCache = [];
+    private const int StoredReadCacheLimit = 4096;
     private readonly Dictionary<StatisticsRange, StatisticsSnapshot> _queryCache = [];
     private readonly Dictionary<(string Key, string? Path), string> _stableIds = [];
+    private readonly Dictionary<(Guid Collector, ProcessIdentity Process), string> _instanceIds = [];
     private readonly Dictionary<(int Width, long Start, long End), DistributionPiece[]> _distributionCache = [];
     private readonly Dictionary<string, ApplicationEntry> _applications = new(StringComparer.Ordinal);
     private readonly HashSet<string> _changedApplications = [];
     private readonly Dictionary<string, (string? Source, DateTimeOffset Checked)> _iconChecks = [];
     private readonly Dictionary<Guid, long> _sequences = [];
     private readonly Dictionary<(string Entity, StatisticMetric Metric), long> _coverageEnds = [];
+    private readonly HashSet<(string Entity, StatisticMetric Metric)> _dirtyCoverage = [];
     private HashSet<string> _running = [];
     private SqliteConnection? _connection;
     private DateTimeOffset? _lastRecorded, _lastSaved, _lastReset;
@@ -150,10 +153,12 @@ public sealed partial class StatisticsService : IAsyncDisposable
         if (frame.Sequence < 0 || _sequences.TryGetValue(frame.CollectorRunId, out var previous) && frame.Sequence <= previous) return;
         _queryCache.Clear(); _distributionCache.Clear();
         _sequences[frame.CollectorRunId] = frame.Sequence;
-        _running = snapshot.Processes.Select(p => AppId(p.Software, p.Identity, frame.CollectorRunId)).ToHashSet();
+        var running = snapshot.Processes.Select(p => AppId(p.Software, p.Identity, frame.CollectorRunId)).ToHashSet();
+        if (_running.Any(id => !running.Contains(id))) _catalogNeedsCleanup = true;
+        _running = running;
         var groups = frame.Processes.GroupBy(p => AppId(p.Software, p.Identity, frame.CollectorRunId)).ToArray();
         foreach (var group in groups)
-            Remember(group.OrderByDescending(p => p.Software.IconPath is not null)
+            Remember(group.Key, group.OrderByDescending(p => p.Software.IconPath is not null)
                 .ThenByDescending(p => p.Software.DisplayName != p.Software.ProcessName).First(), frame);
         if (frame.System is { } system)
         {
@@ -177,7 +182,7 @@ public sealed partial class StatisticsService : IAsyncDisposable
             var members = group.GroupBy(p => p.Identity).Select(g => g.Last()).ToArray();
             foreach (var observed in ProcessAccountingAggregation.ObservedWindows(members, frame))
                 AddObserved(group.Key, observed.Start, observed.End, (observed.End - observed.Start).TotalSeconds, null);
-            foreach (var metric in Enum.GetValues<StatisticMetric>())
+            foreach (var metric in StatisticMetrics.All)
             {
                 // Preserve exact measured counters even if another child is unavailable in the same interval.
                 foreach (var member in members)
@@ -192,6 +197,7 @@ public sealed partial class StatisticsService : IAsyncDisposable
                 var segments = ProcessAccountingAggregation.AggregateMetric(members, metric, frame);
                 var coverageKey = (group.Key, metric);
                 long coveredUntil = _coverageEnds.GetValueOrDefault(coverageKey);
+                long previousCoverage = coveredUntil;
                 foreach (var value in segments)
                 {
                     if (!TryWindow(value, frame, out var start, out var end) || end.UtcTicks <= coveredUntil) continue;
@@ -206,7 +212,11 @@ public sealed partial class StatisticsService : IAsyncDisposable
                     AddMetric(group.Key, metric, clipped, frame);
                     coveredUntil = end.UtcTicks;
                 }
-                _coverageEnds[coverageKey] = coveredUntil;
+                if (coveredUntil != previousCoverage)
+                {
+                    _coverageEnds[coverageKey] = coveredUntil;
+                    _dirtyCoverage.Add(coverageKey);
+                }
             }
         }
         _lastRecorded = frame.EndUtc;
@@ -328,6 +338,8 @@ public sealed partial class StatisticsService : IAsyncDisposable
             (software.Key.StartsWith("package:", StringComparison.OrdinalIgnoreCase) || !string.IsNullOrWhiteSpace(software.FilePath));
         var cacheKey = (software.Key, software.FilePath);
         if (stable && _stableIds.TryGetValue(cacheKey, out var cached)) return cached;
+        var instanceKey = (collector, process);
+        if (!stable && _instanceIds.TryGetValue(instanceKey, out cached)) return cached;
         string identity;
         if (software.Key.StartsWith("package:", StringComparison.OrdinalIgnoreCase))
         {
@@ -345,12 +357,16 @@ public sealed partial class StatisticsService : IAsyncDisposable
             if (_stableIds.Count >= 4096) _stableIds.Clear();
             _stableIds[cacheKey] = id;
         }
+        else
+        {
+            if (_instanceIds.Count >= 4096) _instanceIds.Clear();
+            _instanceIds[instanceKey] = id;
+        }
         return id;
     }
 
-    private void Remember(ProcessAccounting process, AccountingFrame frame)
+    private void Remember(string id, ProcessAccounting process, AccountingFrame frame)
     {
-        string id = AppId(process.Software, process.Identity, frame.CollectorRunId);
         _applications.TryGetValue(id, out var previous);
         var software = process.Software;
         bool usefulName = !string.Equals(software.DisplayName, software.ProcessName, StringComparison.OrdinalIgnoreCase) &&

@@ -26,6 +26,9 @@ var resolver = new Resolver();
 using var sampler = new WindowsSampler(resolver);
 var first = sampler.Sample();
 Check(first.Accounting is { Discontinuity: true, Sequence: 1 }, "first sample establishes an accounting baseline");
+Check(first.System.NetworkInterfaces.All(x => x.DownloadBytesPerSecond is null && x.UploadBytesPerSecond is null) &&
+    first.System.PhysicalDisks.All(x => x.ReadBytesPerSecond is null && x.WriteBytesPerSecond is null),
+    "first device sample establishes baselines without inventing zero rates");
 await Task.Delay(1100);
 var second = sampler.Sample();
 var accounting = second.Accounting!;
@@ -42,6 +45,37 @@ if (accounting.System.Metrics[StatisticMetric.DiskRead].State == MetricState.Rea
 if (!second.IsElevated)
     Check(accounting.Processes.All(p => p.Metrics[StatisticMetric.Download].State == MetricState.PermissionRequired &&
         p.Metrics[StatisticMetric.Download].BytesDelta is null), "ordinary permission never becomes fake application traffic zero");
+
+Check(second.System.NetworkInterfaces.Select(x => x.Id).Distinct(StringComparer.OrdinalIgnoreCase).Count() == second.System.NetworkInterfaces.Count &&
+    second.System.PhysicalDisks.Select(x => x.Id).Distinct(StringComparer.OrdinalIgnoreCase).Count() == second.System.PhysicalDisks.Count,
+    "selectable interfaces and physical disks have unique identifiers");
+Check(second.System.NetworkInterfaces.All(x => x.State != MetricState.Ready ||
+    x.IsConnected && x.DownloadBytesPerSecond is >= 0 && x.UploadBytesPerSecond is >= 0) &&
+    second.System.NetworkInterfaces.All(x => x.IsConnected || x.DownloadBytesPerSecond is null && x.UploadBytesPerSecond is null),
+    "interface readiness distinguishes disconnected and unavailable data from measured zero");
+Check(second.System.PhysicalDisks.All(x => x.Id != "_Total" && (x.State != MetricState.Ready ||
+    x.ReadBytesPerSecond is >= 0 && x.WriteBytesPerSecond is >= 0)),
+    "selectable physical disks exclude aggregate duplication and expose valid ready rates");
+if (second.System.DefaultNetworkInterfaceId is { } defaultId)
+{
+    var automatic = second.System.NetworkInterfaces.Single(x => x.Id == defaultId);
+    Check(automatic.DownloadBytesPerSecond == second.System.DownloadBytesPerSecond &&
+        automatic.UploadBytesPerSecond == second.System.UploadBytesPerSecond,
+        "automatic network values reuse the selected interface sample");
+}
+if (second.System.PhysicalDisks is { Count: > 0 } disks && disks.All(x => x.State == MetricState.Ready) &&
+    accounting.System.Metrics[StatisticMetric.DiskRead] is { State: MetricState.Ready, Peak: { } rawRead })
+    Check(Math.Abs(disks.Sum(x => x.ReadBytesPerSecond!.Value) - rawRead) < 1,
+        "per-disk selection rates reuse the same raw counters as global accounting");
+var roundtrip = JsonSerializer.Deserialize<MonitorSnapshot>(JsonSerializer.Serialize(second))!;
+Check(roundtrip.System.NetworkInterfaces.Count == second.System.NetworkInterfaces.Count &&
+    roundtrip.System.PhysicalDisks.Count == second.System.PhysicalDisks.Count,
+    "device-selection fields survive collector JSON transport");
+if (args.Contains("--devices-only"))
+{
+    Console.WriteLine(JsonSerializer.Serialize(new { second.System.NetworkInterfaces, second.System.PhysicalDisks, second.System.DefaultNetworkInterfaceId }));
+    return;
+}
 
 var childInfo = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true };
 if (string.Equals(Path.GetFileNameWithoutExtension(Environment.ProcessPath), "dotnet", StringComparison.OrdinalIgnoreCase))
@@ -85,8 +119,12 @@ using (var child = Process.Start(childInfo)!)
 }
 
 await Task.Delay(5500);
-var gap = sampler.Sample().Accounting!;
+var gapSnapshot = sampler.Sample();
+var gap = gapSnapshot.Accounting!;
 Check(gap.Discontinuity && gap.System!.Metrics.Values.All(x => x.ValidSeconds == 0), "long sampling gap does not integrate stale gauges or counters");
+Check(gapSnapshot.System.NetworkInterfaces.All(x => x.DownloadBytesPerSecond is null && x.UploadBytesPerSecond is null) &&
+    gapSnapshot.System.PhysicalDisks.All(x => x.ReadBytesPerSecond is null && x.WriteBytesPerSecond is null),
+    "device rates become unavailable across a long sampling gap");
 await Task.Delay(1100);
 var resumed = sampler.Sample().Accounting!;
 Check(!resumed.Discontinuity && resumed.System!.Metrics[StatisticMetric.Cpu].State == MetricState.Ready, "sampling resumes from new baselines");

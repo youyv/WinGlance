@@ -8,6 +8,7 @@ namespace WinGlance.Windows.Telemetry;
 internal sealed unsafe class PhysicalNetworkAccounting
 {
     private Dictionary<Guid, (ulong Luid, ulong Receive, ulong Send)> _previous = [];
+    private Dictionary<Guid, (ulong Luid, ulong Receive, ulong Send, bool Connected)> _devicePrevious = [];
     private long _lastTimestamp;
     private DateTimeOffset _lastUtc;
 
@@ -21,27 +22,50 @@ internal sealed unsafe class PhysicalNetworkAccounting
         _lastUtc = endUtc;
         var rows = new List<NetworkInterfaceAccounting>();
         var next = new Dictionary<Guid, (ulong Luid, ulong Receive, ulong Send)>();
+        var devices = new List<NetworkInterfaceSample>();
+        var deviceNext = new Dictionary<Guid, (ulong Luid, ulong Receive, ulong Send, bool Connected)>();
         nint table = 0;
         uint error = GetIfTable2(out table);
         if (error != 0 || table == 0)
         {
             _previous.Clear();
+            _devicePrevious.Clear();
             if (table != 0) FreeMibTable(table);
             return Failure(MetricState.Error, seconds, $"物理网卡计数器不可用（{error}）");
         }
         try
         {
             uint count = *(uint*)table;
-            if (count > 16384) { _previous.Clear(); return Failure(MetricState.Error, seconds, "网络接口数量超出采集上限"); }
+            if (count > 16384) { _previous.Clear(); _devicePrevious.Clear(); return Failure(MetricState.Error, seconds, "网络接口数量超出采集上限"); }
             var first = (IfRow*)((byte*)table + Marshal.OffsetOf<IfTable>(nameof(IfTable.First)).ToInt32());
             bool continuous = !reset && AccountingMath.Continuous(seconds);
             for (uint i = 0; i < count; i++)
             {
                 var row = first + i;
                 byte flags = row->Flags;
-                if ((flags & 1) == 0 || (flags & 2) != 0 || (flags & 128) != 0 || row->Type is 24 or 131) continue;
+                // InterfaceAndOperStatusFlags identifies hidden filter/end-point interfaces without
+                // guessing from localized driver names. User-facing virtual adapters remain selectable.
+                if ((flags & 2) != 0 || (flags & 128) != 0 || row->Type == 24) continue;
                 Guid id = row->InterfaceGuid;
-                if (next.ContainsKey(id)) continue;
+                if (deviceNext.ContainsKey(id)) continue;
+                bool physical = (flags & 1) != 0 && row->Type != 131;
+                bool connected = row->OperStatus == 1;
+                string name = new((char*)row->Alias);
+                string description = new((char*)row->Description);
+                if (name.Length == 0) name = description;
+                deviceNext[id] = (row->InterfaceLuid, row->InOctets, row->OutOctets, connected);
+                bool deviceExists = _devicePrevious.TryGetValue(id, out var deviceOld);
+                bool deviceKnown = continuous && connected && deviceExists &&
+                    deviceOld.Connected && deviceOld.Luid == row->InterfaceLuid;
+                double? deviceDown = deviceKnown && row->InOctets >= deviceOld.Receive && row->InOctets - deviceOld.Receive <= long.MaxValue
+                    ? (row->InOctets - deviceOld.Receive) / seconds : null;
+                double? deviceUp = deviceKnown && row->OutOctets >= deviceOld.Send && row->OutOctets - deviceOld.Send <= long.MaxValue
+                    ? (row->OutOctets - deviceOld.Send) / seconds : null;
+                bool deviceReady = deviceDown.HasValue && deviceUp.HasValue;
+                devices.Add(new(id.ToString("B").ToUpperInvariant(), name, deviceDown, deviceUp,
+                    !connected ? MetricState.Unsupported : deviceReady ? MetricState.Ready : MetricState.WarmingUp,
+                    physical, connected, connected ? description : "网络接口未连接"));
+                if (!physical) continue;
                 next[id] = (row->InterfaceLuid, row->InOctets, row->OutOctets);
                 bool exists = _previous.TryGetValue(id, out var old);
                 bool known = continuous && exists && old.Luid == row->InterfaceLuid;
@@ -50,8 +74,6 @@ internal sealed unsafe class PhysicalNetworkAccounting
                 long? sent = known && row->OutOctets >= old.Send && row->OutOctets - old.Send <= long.MaxValue
                     ? (long)(row->OutOctets - old.Send) : null;
                 bool ready = received.HasValue && sent.HasValue;
-                string name = new((char*)row->Alias);
-                if (name.Length == 0) name = new string((char*)row->Description);
                 rows.Add(new(id.ToString("D"), name, row->InterfaceLuid, received, sent, seconds,
                     ready ? MetricState.Ready : MetricState.WarmingUp,
                     ready ? null : "接口首次出现、计数重置或采集间断，已重新建立基线"));
@@ -59,7 +81,8 @@ internal sealed unsafe class PhysicalNetworkAccounting
             // A missing or new interface is a scope boundary: do not mix partial hardware totals with complete totals.
             bool sameScope = _previous.Count == next.Count && _previous.Keys.All(next.ContainsKey);
             _previous = next;
-            if (rows.Count == 0) return Failure(MetricState.Unsupported, seconds, "未发现可统计的硬件网络接口");
+            _devicePrevious = deviceNext;
+            if (rows.Count == 0) return Failure(MetricState.Unsupported, seconds, "未发现可统计的硬件网络接口") with { Devices = devices };
             bool complete = continuous && sameScope && rows.All(x => x.State == MetricState.Ready);
             long? down = complete ? CheckedSum(rows.Select(x => x.DownloadBytesDelta!.Value)) : null;
             long? up = complete ? CheckedSum(rows.Select(x => x.UploadBytesDelta!.Value)) : null;
@@ -67,7 +90,8 @@ internal sealed unsafe class PhysicalNetworkAccounting
             string? detail = complete ? null : "接口范围变化或计数不连续，本窗口总量不可用";
             return new(rows, scope,
                 AccountingMath.Bytes(down, seconds, continuous, MetricState.WarmingUp, detail) with { StartUtc = startUtc, EndUtc = endUtc },
-                AccountingMath.Bytes(up, seconds, continuous, MetricState.WarmingUp, detail) with { StartUtc = startUtc, EndUtc = endUtc });
+                AccountingMath.Bytes(up, seconds, continuous, MetricState.WarmingUp, detail) with { StartUtc = startUtc, EndUtc = endUtc })
+            { Devices = devices };
         }
         finally { FreeMibTable(table); }
     }
@@ -108,4 +132,7 @@ internal sealed unsafe class PhysicalNetworkAccounting
 }
 
 internal sealed record NetworkAccountingSample(IReadOnlyList<NetworkInterfaceAccounting> Interfaces,
-    string Scope, MetricAccounting Download, MetricAccounting Upload);
+    string Scope, MetricAccounting Download, MetricAccounting Upload)
+{
+    internal IReadOnlyList<NetworkInterfaceSample> Devices { get; init; } = [];
+}

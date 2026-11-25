@@ -48,6 +48,12 @@ public sealed partial class StatisticsView : UserControl
         if (StatsHideSystem.IsOn == value) return;
         StatsHideSystem.IsOn = value;
     }
+    public void SetCollectionState(string label, bool enabled, string description)
+    {
+        StatsEnhancedButton.Content = label;
+        StatsEnhancedButton.IsEnabled = enabled;
+        ToolTipService.SetToolTip(StatsEnhancedButton, description);
+    }
     private async void Refresh()
     {
         if (!_active || _resetting) return;

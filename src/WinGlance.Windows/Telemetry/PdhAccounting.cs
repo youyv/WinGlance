@@ -29,8 +29,20 @@ internal sealed partial class PdhMetrics
         _accountingTimestamp = timestamp;
         _accountingUtc = endUtc;
         bool continuous = !reset && AccountingMath.Continuous(seconds) && status == 0;
-        var diskRead = ReadDiskDelta("diskReadAccounting", seconds, continuous, status == 0);
-        var diskWrite = ReadDiskDelta("diskWriteAccounting", seconds, continuous, status == 0);
+        var diskRead = ReadDiskDelta("diskReadAccounting", seconds, continuous, status == 0, out var diskReads);
+        var diskWrite = ReadDiskDelta("diskWriteAccounting", seconds, continuous, status == 0, out var diskWrites);
+        var disks = diskReads.Keys.Concat(diskWrites.Keys).Distinct(StringComparer.OrdinalIgnoreCase).Select(id =>
+        {
+            var read = diskReads.GetValueOrDefault(id) ?? AccountingMath.Missing(MetricState.Error, seconds, "该磁盘读取计数器不可用");
+            var write = diskWrites.GetValueOrDefault(id) ?? AccountingMath.Missing(MetricState.Error, seconds, "该磁盘写入计数器不可用");
+            var state = read.State == MetricState.Ready && write.State == MetricState.Ready ? MetricState.Ready
+                : read.State == MetricState.Error || write.State == MetricState.Error ? MetricState.Error
+                : read.State == MetricState.Unsupported || write.State == MetricState.Unsupported ? MetricState.Unsupported
+                : MetricState.WarmingUp;
+            return new PhysicalDiskSample(id, $"磁盘 {id}", read.State == MetricState.Ready ? read.Peak : null,
+                write.State == MetricState.Ready ? write.Peak : null, state,
+                state == MetricState.Ready ? "物理磁盘字节差分；实例标识可能随分区变化" : read.Detail ?? write.Detail);
+        }).ToArray();
         var dedicated = status == 0 ? Read("adapterDedicated") : CounterArray.Failed;
         var shared = status == 0 ? Read("adapterShared") : CounterArray.Failed;
         var dedicatedByAdapter = AdapterMemory(dedicated);
@@ -58,7 +70,8 @@ internal sealed partial class PdhMetrics
         return new(seconds, startUtc, endUtc, continuous, Stamp(diskRead), Stamp(diskWrite),
             Stamp(AccountingMath.Gauge(gpuPercent, seconds, continuous, gpuState)),
             Stamp(AccountingMath.Gauge(totalDedicated, seconds, continuous, MetricState.Unsupported)),
-            Stamp(AccountingMath.Gauge(totalShared, seconds, continuous, MetricState.Unsupported)), adapters, totalCapacity);
+            Stamp(AccountingMath.Gauge(totalShared, seconds, continuous, MetricState.Unsupported)), adapters, totalCapacity)
+        { PhysicalDisks = disks };
     }
 
     private static Dictionary<string, long> AdapterMemory(CounterArray array)
@@ -97,8 +110,10 @@ internal sealed partial class PdhMetrics
         return any ? sum : null;
     }
 
-    private MetricAccounting ReadDiskDelta(string key, double fallbackSeconds, bool continuous, bool collected)
+    private MetricAccounting ReadDiskDelta(string key, double fallbackSeconds, bool continuous, bool collected,
+        out Dictionary<string, MetricAccounting> devices)
     {
+        devices = new(StringComparer.OrdinalIgnoreCase);
         MetricAccounting Missing(MetricState state, string detail) => AccountingMath.Missing(state, fallbackSeconds, detail);
         if (!_counters.TryGetValue(key, out var counter)) return Missing(MetricState.Unsupported, "物理磁盘原始计数器不可用");
         if (!collected) { _rawPrevious.Remove(key); return Missing(MetricState.Error, "PDH 采集失败"); }
@@ -124,6 +139,8 @@ internal sealed partial class PdhMetrics
         { _rawPrevious.Remove(key); return Missing(MetricState.Error, "磁盘原始计数数组不可用"); }
         _rawPrevious.TryGetValue(key, out var previous);
         _rawPrevious[key] = current;
+        foreach (string id in current.Keys)
+            devices[id] = Missing(MetricState.WarmingUp, "磁盘首次出现、设备范围变化或计数间断，正在建立基线");
         if (!continuous || previous is null || previous.Count != current.Count || !previous.Keys.All(current.ContainsKey))
             return Missing(MetricState.WarmingUp, "磁盘设备范围变化或采集间断，正在建立基线");
         long bytes = 0;
@@ -138,6 +155,7 @@ internal sealed partial class PdhMetrics
             if (!AccountingMath.Continuous(elapsed) || duration.HasValue && Math.Abs(duration.Value - elapsed) > 0.01)
                 return Missing(MetricState.WarmingUp, "磁盘计数区间不连续或设备时间基准不一致");
             duration = elapsed;
+            devices[item.Key] = AccountingMath.Bytes(value.First - old.First, elapsed, true);
             try { bytes = checked(bytes + value.First - old.First); }
             catch (OverflowException) { return Missing(MetricState.Error, "磁盘累计计数溢出"); }
         }
@@ -194,4 +212,7 @@ internal sealed partial class PdhMetrics
 internal sealed record PdhAccountingSample(double IntervalSeconds, DateTimeOffset StartUtc, DateTimeOffset EndUtc,
     bool Continuous, MetricAccounting DiskRead, MetricAccounting DiskWrite, MetricAccounting Gpu,
     MetricAccounting DedicatedGpuMemory, MetricAccounting SharedGpuMemory,
-    IReadOnlyList<GpuAdapterAccounting> Adapters, long? DedicatedCapacityBytes);
+    IReadOnlyList<GpuAdapterAccounting> Adapters, long? DedicatedCapacityBytes)
+{
+    public IReadOnlyList<PhysicalDiskSample> PhysicalDisks { get; init; } = [];
+}

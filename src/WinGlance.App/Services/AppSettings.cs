@@ -9,6 +9,10 @@ public sealed class AppSettings
     public bool HideSystem { get; set; } = true;
     public bool CloseToTray { get; set; } = true;
     public bool ShowOverlay { get; set; }
+    public int? OverlayX { get; set; }
+    public int? OverlayY { get; set; }
+    public string? NetworkInterfaceId { get; set; }
+    public string? PhysicalDiskId { get; set; }
     public static AppSettings Load()
     {
         try { return File.Exists(FilePath) ? JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath)) ?? new() : new(); }
@@ -20,7 +24,10 @@ public sealed class AppSettings
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(this));
+            // Same-directory replacement avoids a truncated settings file on interrupted writes.
+            var temporary = FilePath + ".tmp";
+            File.WriteAllText(temporary, JsonSerializer.Serialize(this));
+            File.Move(temporary, FilePath, true);
             error = null;
             return true;
         }

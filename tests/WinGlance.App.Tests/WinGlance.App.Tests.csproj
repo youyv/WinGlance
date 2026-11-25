@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/WinGlance.Core/WinGlance.Core.csproj" />
+    <Compile Include="../../src/WinGlance.App/Services/CollectorClient.cs" Link="CollectorClient.cs" />
+    <Compile Include="../../src/WinGlance.App/Services/SessionEndCoordinator.cs" Link="SessionEndCoordinator.cs" />
+    <Compile Include="../../src/WinGlance.App/Services/ProcessPresentation.cs" Link="ProcessPresentation.cs" />
+    <Compile Include="../../src/WinGlance.App/Services/OverviewSelection.cs" Link="OverviewSelection.cs" />
+    <Compile Include="../../src/WinGlance.App/Services/OverlayPlacement.cs" Link="OverlayPlacement.cs" />
+    <Compile Include="../../src/WinGlance.App/Services/LiveSnapshotStore.cs" Link="LiveSnapshotStore.cs" />
+  </ItemGroup>
+</Project>

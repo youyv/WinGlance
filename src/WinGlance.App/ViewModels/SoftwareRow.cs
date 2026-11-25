@@ -75,9 +75,10 @@ public sealed class SoftwareRow : INotifyPropertyChanged
         bool childChanged = isChild != (previousProcess is not null);
         string name = process?.Software.ProcessName ?? sample.Software.DisplayName;
         bool nameChanged = !string.Equals(_name, name, StringComparison.Ordinal);
-        bool tooltipChanged = !_initialized || nameChanged ||
-            !string.Equals(previousSample.Software.FilePath, sample.Software.FilePath, StringComparison.Ordinal) ||
-            !SamePids(previousSample.Processes, sample.Processes);
+        bool tooltipChanged = !_initialized || nameChanged || childChanged ||
+            !string.Equals(previousProcess is null ? previousSample.Software.FilePath : previousProcess.Software.FilePath,
+                process is null ? sample.Software.FilePath : process.Software.FilePath, StringComparison.Ordinal) ||
+            (isChild ? previousProcess?.Identity != process!.Identity : !SamePids(previousSample.Processes, sample.Processes));
         bool subtitleChanged = !_initialized || childChanged || (isChild
             ? previousProcess?.Identity.Pid != process!.Identity.Pid
             : previousSample.Processes.Count != sample.Processes.Count || previousSample.Software.Category != sample.Software.Category);
@@ -89,7 +90,7 @@ public sealed class SoftwareRow : INotifyPropertyChanged
             Set(ref _subtitle, process is { } child ? $"PID {child.Identity.Pid}" :
                 $"{sample.Processes.Count} 个进程 · {CategoryName(sample.Software.Category)}", Changes.Subtitle);
         if (tooltipChanged)
-            Set(ref _tooltip, $"{name}\n{sample.Software.FilePath ?? "路径不可访问"}\nPID: {string.Join(", ", sample.Processes.Select(p => p.Identity.Pid))}", Changes.Tooltip);
+            Set(ref _tooltip, ProcessPresentation.Tooltip(name, sample, process), Changes.Tooltip);
         if (!_initialized || childChanged)
         {
             Set(ref _indent, new Thickness(isChild ? 28 : 0, 0, 0, 0), Changes.Indent);

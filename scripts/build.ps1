@@ -15,6 +15,8 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Telemetry tests failed.' }
         & $dotnetPath run --project 'tests/WinGlance.Statistics.Tests' -c $Configuration
         if ($LASTEXITCODE -ne 0) { throw 'Statistics tests failed.' }
+        & $dotnetPath run --project 'tests/WinGlance.App.Tests' -c $Configuration
+        if ($LASTEXITCODE -ne 0) { throw 'App service tests failed.' }
     }
     & $dotnetPath publish 'src/WinGlance.Collector/WinGlance.Collector.csproj' -c $Configuration -o $outputPath --nologo
     if ($LASTEXITCODE -ne 0) { throw 'Collector build failed.' }

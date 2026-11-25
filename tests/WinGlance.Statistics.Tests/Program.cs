@@ -344,6 +344,8 @@ var tests = new List<(string Name, Func<string, Task> Run)>
     })
 };
 
+tests.AddRange(CatalogCleanupTests.Cases);
+tests.AddRange(OptimizationRegressionTests.Cases);
 int failed = 0;
 foreach (var (name, run) in tests)
 {

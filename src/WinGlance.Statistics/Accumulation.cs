@@ -3,6 +3,11 @@ using WinGlance.Core;
 
 namespace WinGlance.Statistics;
 
+internal static class StatisticMetrics
+{
+    internal static readonly StatisticMetric[] All = Enum.GetValues<StatisticMetric>();
+}
+
 internal sealed class MetricTotal
 {
     public double Integral { get; set; }
@@ -98,7 +103,7 @@ internal sealed class BucketData
     private static long? Max(long? a, long? b) => a is null ? b : b is null ? a : Math.Max(a.Value, b.Value);
 
     public IReadOnlyDictionary<StatisticMetric, MetricStatistics> SnapshotMetrics() =>
-        new ReadOnlyDictionary<StatisticMetric, MetricStatistics>(Enum.GetValues<StatisticMetric>()
+        new ReadOnlyDictionary<StatisticMetric, MetricStatistics>(StatisticMetrics.All
             .ToDictionary(metric => metric, metric => Metrics.GetValueOrDefault(metric)?.Snapshot(ObservedSeconds)
                 ?? new MetricStatistics(null, 0, null, null, null, null, 0)));
 
