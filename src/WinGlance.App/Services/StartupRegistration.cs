@@ -21,9 +21,12 @@ public static class StartupRegistration
 {
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string ValueName = "WinGlance";
+    private static StartupRegistrationStatus _diagnosticStatus = new(StartupRegistrationState.Disabled, null);
 
     public static StartupRegistrationStatus GetStatus()
     {
+        // Diagnostic instances must never observe or mutate the user's shared Run entry.
+        if (AppPaths.IsDiagnostic) return _diagnosticStatus;
         using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: false);
         if (key is null || !Array.Exists(key.GetValueNames(), name =>
                 string.Equals(name, ValueName, StringComparison.OrdinalIgnoreCase)))
@@ -71,6 +74,10 @@ public static class StartupRegistration
     /// <summary>Changes only the WinGlance value and returns its verified state. Errors are reported to the caller.</summary>
     public static StartupRegistrationStatus SetEnabled(bool enabled, bool startMinimized = false)
     {
+        if (AppPaths.IsDiagnostic)
+            return _diagnosticStatus = enabled
+                ? new(StartupRegistrationState.Enabled, GetCurrentCommand(startMinimized), startMinimized)
+                : new(StartupRegistrationState.Disabled, null);
         if (enabled)
         {
             var command = GetCurrentCommand(startMinimized);
