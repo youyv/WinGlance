@@ -133,7 +133,7 @@ internal static class StatisticsExportTests
         var oldCulture = CultureInfo.CurrentCulture;
         CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("de-DE");
         StatisticsExportResult result;
-        try { result = await StatisticsExporter.WriteAsync(operation, data, StatisticsExportDestination.Capture(destination)); }
+        try { result = await StatisticsExporter.WriteAsync(operation, data, StatisticsExportDestination.CreateNew(destination)); }
         finally { CultureInfo.CurrentCulture = oldCulture; }
         Require(result.Phase == StatisticsExportPhase.Completed && result.Warning?.Contains("7 个") == true, "Formula-prefix warning/count missing.");
         Require(File.ReadAllBytes(destination).Take(3).SequenceEqual(new byte[] { 239, 187, 191 }), "CSV must contain UTF-8 BOM.");
@@ -152,7 +152,7 @@ internal static class StatisticsExportTests
     {
         var data = await Sample(path, "=original");
         string destination = Path.Combine(Path.GetDirectoryName(path)!, "sample.json");
-        var result = await StatisticsExporter.WriteAsync(Operation(), data, StatisticsExportDestination.Capture(destination));
+        var result = await StatisticsExporter.WriteAsync(Operation(), data, StatisticsExportDestination.CreateNew(destination));
         Require(result.Phase == StatisticsExportPhase.Completed && result.Warning is null, "JSON should not sanitize text.");
         string raw = File.ReadAllText(destination); using var document = JsonDocument.Parse(raw);
         var app = document.RootElement.GetProperty("applications")[0];
@@ -167,31 +167,31 @@ internal static class StatisticsExportTests
         var data = await Sample(path);
         string directory = Path.GetDirectoryName(path)!;
         string destination = Path.Combine(directory, "export.json");
-        var result = await StatisticsExporter.WriteAsync(Operation(), data, StatisticsExportDestination.Capture(destination));
+        var result = await StatisticsExporter.WriteAsync(Operation(), data, StatisticsExportDestination.CreateNew(destination));
         Require(result.Phase == StatisticsExportPhase.Completed && JsonDocument.Parse(File.ReadAllText(destination)).RootElement.GetProperty("schemaVersion").GetInt32() == 1, "New export failed.");
         File.WriteAllText(destination, "original");
-        result = await StatisticsExporter.WriteAsync(Operation(), data, StatisticsExportDestination.Capture(destination));
+        result = await StatisticsExporter.WriteAsync(Operation(), data, StatisticsExportDestination.ConfirmedOverwrite(destination));
         Require(result.Phase == StatisticsExportPhase.Completed && !Directory.EnumerateDirectories(directory, ".winglance-recovery-*").Any(), "Real replace did not clean its backup.");
 
         File.WriteAllText(destination, "locked original");
-        var selected = StatisticsExportDestination.Capture(destination);
+        var selected = StatisticsExportDestination.ConfirmedOverwrite(destination);
         using (var locked = new FileStream(destination, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
             result = await StatisticsExporter.WriteAsync(Operation(), data, selected);
         Require(result.Phase == StatisticsExportPhase.Failed && File.ReadAllText(destination) == "locked original", "Sharing violation damaged the original.");
 
         string racePath = Path.Combine(directory, "race.json");
-        selected = StatisticsExportDestination.Capture(racePath);
+        selected = StatisticsExportDestination.CreateNew(racePath);
         File.WriteAllText(racePath, "other writer");
         result = await StatisticsExporter.WriteAsync(Operation(), data, selected);
         Require(result.Phase == StatisticsExportPhase.Failed && File.ReadAllText(racePath) == "other writer", "New-file race overwrote another writer.");
 
-        selected = StatisticsExportDestination.Capture(destination);
+        selected = StatisticsExportDestination.ConfirmedOverwrite(destination);
         File.Delete(destination);
         result = await StatisticsExporter.WriteAsync(Operation(), data, selected);
         Require(result.Phase == StatisticsExportPhase.Failed && !File.Exists(destination), "Missing existing target downgraded to new-file move.");
-        try { StatisticsExportDestination.Capture(directory); throw new Exception("Directory accepted as file."); }
+        try { ExportFileSystem.Instance.Probe(directory); throw new Exception("Directory accepted as file."); }
         catch (IOException) { }
-        try { StatisticsExportDestination.Capture(Path.Combine(directory, "missing-parent", "child.json")); throw new Exception("Unknown parent treated as missing file."); }
+        try { ExportFileSystem.Instance.Probe(Path.Combine(directory, "missing-parent", "child.json")); throw new Exception("Unknown parent treated as missing file."); }
         catch (DirectoryNotFoundException) { }
     }
 
@@ -203,7 +203,7 @@ internal static class StatisticsExportTests
             string folder = Path.Combine(root, scenario); Directory.CreateDirectory(folder);
             string destination = Path.Combine(folder, "existing.json"), temporary = Path.Combine(folder, "owned.tmp");
             File.WriteAllText(destination, "original bytes"); File.WriteAllText(temporary, "new bytes");
-            var target = StatisticsExportDestination.Capture(destination);
+            var target = StatisticsExportDestination.ConfirmedOverwrite(destination);
             var files = new FaultFiles(); string? backup = null;
             files.Replacing = (source, targetPath, saved) =>
             {
@@ -261,7 +261,7 @@ internal static class StatisticsExportTests
         var selecting = new StatisticsExportOperation(Request(), StatisticsExportFormat.Json);
         Require(selecting.TryCancel() && (await selecting.Completion).Phase == StatisticsExportPhase.Cancelled && selecting.WriteTask is null && !selecting.TryBeginCapture(), "Selecting cancellation must finish independently.");
         var cancelled = Operation(); cancelled.TryCancel();
-        var cancellation = await StatisticsExporter.WriteAsync(cancelled, data, StatisticsExportDestination.Capture(destination));
+        var cancellation = await StatisticsExporter.WriteAsync(cancelled, data, StatisticsExportDestination.CreateNew(destination));
         Require(cancellation.Phase == StatisticsExportPhase.Cancelled && !File.Exists(destination), "Pre-write cancellation touched destination.");
 
         var writing = Operation();
@@ -286,7 +286,7 @@ internal static class StatisticsExportTests
             if (!commitRelease.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("Commit gate");
             ExportFileSystem.Instance.Move(source, target);
         } };
-        var actualWriter = StatisticsExporter.WriteAsync(committing, data, StatisticsExportDestination.Capture(destination), files);
+        var actualWriter = StatisticsExporter.WriteAsync(committing, data, StatisticsExportDestination.CreateNew(destination), files);
         Require(ReferenceEquals(actualWriter, committing.WriteTask), "Public writer did not register before returning.");
         await committedEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Require(committing.Phase == StatisticsExportPhase.Committing && !committing.TryCancel(), "Cancel won after commit started.");
@@ -299,7 +299,7 @@ internal static class StatisticsExportTests
     {
         var snapshot = await Sample(path); string directory = Path.GetDirectoryName(path)!;
         string target = Path.Combine(directory, "original.json"); File.WriteAllText(target, "keep original");
-        var selected = StatisticsExportDestination.Capture(target);
+        var selected = StatisticsExportDestination.ConfirmedOverwrite(target);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var release = new ManualResetEventSlim();
         var slow = snapshot with { System = snapshot.System with { Metrics = new InterceptMetrics(snapshot.System.Metrics, () =>

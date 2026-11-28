@@ -29,7 +29,7 @@ public sealed partial class StatisticsView : UserControl
     public event Action? ReconnectRequested;
     public event Action? CollectionNoticeDismissed;
     public Func<StatisticsRange, Task<bool>>? ConfirmReset { get; set; }
-    internal Func<StatisticsExportFormat, string, CancellationToken, Task<string?>>? PickExportPath { get; set; }
+    internal Func<StatisticsExportFormat, string, CancellationToken, Task<StatisticsExportDestination?>>? PickExportDestination { get; set; }
     private StatisticsRange Range => (StatisticsRange)Math.Max(0, RangePicker.SelectedIndex);
 
     public StatisticsView(StatisticsService service, bool hideSystem)
@@ -278,13 +278,13 @@ public sealed partial class StatisticsView : UserControl
     private void Enhanced_Click(object sender, RoutedEventArgs e) => EnhancedRequested?.Invoke();
     private async void Export_Click(object sender, RoutedEventArgs e)
     {
-        if (_exportStopping || _exportOperation is not null || PickExportPath is null) return;
+        if (_exportStopping || _exportOperation is not null || PickExportDestination is null) return;
         var format = (sender as FrameworkElement)?.Tag as string == "Csv" ? StatisticsExportFormat.Csv : StatisticsExportFormat.Json;
         var request = new StatisticsExportRequest(Range, StatsHideSystem.IsOn, StatsSearch.Text.Trim(),
             _view, _sort, _descending, DateTimeOffset.UtcNow);
         var operation = new StatisticsExportOperation(request, format);
         _exportOperation = operation;
-        ExportButton.IsEnabled = false; ExportNotice.IsOpen = false;
+        ExportButton.IsEnabled = false; ResetButton.IsEnabled = false; ExportNotice.IsOpen = false;
         ExportProgress.Visibility = Visibility.Visible; ExportSpinner.IsActive = true;
         RenderExportPhase(); _exportTimer.Start();
         StatisticsExportSnapshot? snapshot = null;
@@ -292,12 +292,11 @@ public sealed partial class StatisticsView : UserControl
         {
             string extension = format == StatisticsExportFormat.Csv ? "csv" : "json";
             string filename = $"WinGlance-{RangeName(request.Range)}-{request.RequestedAtUtc.ToLocalTime():yyyyMMdd-HHmmss}.{extension}";
-            string? path = await PickExportPath(format, filename, operation.Token);
-            if (path is null) operation.TryCancel();
+            var destination = await PickExportDestination(format, filename, operation.Token);
+            ResetButton.IsEnabled = !_resetting && !_exportStopping;
+            if (destination is null) operation.TryCancel();
             else
             {
-                // Preserve the overwrite intent immediately after selection, before querying.
-                var destination = StatisticsExportDestination.Capture(path);
                 if (!_exportStopping && operation.TryBeginCapture())
                 {
                     RenderExportPhase();
@@ -314,7 +313,7 @@ public sealed partial class StatisticsView : UserControl
         var result = await operation.Completion;
         if (_exportStopping || !ReferenceEquals(_exportOperation, operation)) return;
         _exportTimer.Stop(); ExportSpinner.IsActive = false; ExportProgress.Visibility = Visibility.Collapsed;
-        _exportOperation = null; ExportButton.IsEnabled = true;
+        _exportOperation = null; ExportButton.IsEnabled = true; ResetButton.IsEnabled = !_resetting;
         ExportNotice.Severity = result.Phase == StatisticsExportPhase.Failed ? InfoBarSeverity.Error :
             result.Warning is not null ? InfoBarSeverity.Warning : InfoBarSeverity.Informational;
         ExportNotice.Title = result.Phase switch
@@ -376,6 +375,6 @@ public sealed partial class StatisticsView : UserControl
             _selectedId = null; HistoryDetail.Visibility = Visibility.Collapsed; _nextReorder = default;
         }
         catch (Exception ex) when (ex is not OutOfMemoryException) { Notice.Title = "重置失败"; Notice.Message = ex.Message; Notice.Severity = InfoBarSeverity.Error; Notice.IsOpen = true; }
-        finally { _resetting = false; ResetButton.IsEnabled = true; Refresh(); }
+        finally { _resetting = false; ResetButton.IsEnabled = !_exportStopping && _exportOperation?.Phase != StatisticsExportPhase.Selecting; Refresh(); }
     }
 }

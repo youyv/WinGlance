@@ -3,17 +3,22 @@ using System.Runtime.InteropServices;
 
 namespace WinGlance.Statistics;
 
+public enum ExportWriteIntent { CreateNew, ConfirmedOverwrite }
+
 public sealed class StatisticsExportDestination
 {
-    private StatisticsExportDestination(string path, bool existed) { Path = path; ExistedAtSelection = existed; }
-    public string Path { get; }
-    public bool ExistedAtSelection { get; }
-    public static StatisticsExportDestination Capture(string path)
+    private StatisticsExportDestination(string path, ExportWriteIntent intent)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        path = System.IO.Path.GetFullPath(path);
-        return new(path, ExportFileSystem.Instance.Probe(path) == ExportPathState.File);
+        Path = System.IO.Path.GetFullPath(path);
+        Intent = intent;
     }
+    public string Path { get; }
+    public ExportWriteIntent Intent { get; }
+    public static StatisticsExportDestination CreateNew(string path) => new(path, ExportWriteIntent.CreateNew);
+    // The caller must obtain explicit user consent for this exact destination.
+    // Filesystem existence is never permission to replace a file.
+    public static StatisticsExportDestination ConfirmedOverwrite(string path) => new(path, ExportWriteIntent.ConfirmedOverwrite);
 }
 
 internal enum ExportPathState { Missing, File }

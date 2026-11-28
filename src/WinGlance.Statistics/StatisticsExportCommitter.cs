@@ -7,7 +7,7 @@ internal static class StatisticsExportCommitter
         string? directory = null, backup = null;
         try
         {
-            if (!destination.ExistedAtSelection)
+            if (destination.Intent == ExportWriteIntent.CreateNew)
             {
                 files.Move(temporary, destination.Path);
                 return new(StatisticsExportPhase.Completed, destination.Path);
@@ -47,7 +47,7 @@ internal static class StatisticsExportCommitter
                     Error: "导出替换失败，原文件恢复位置未能确认；已保留临时文件与恢复目录。" + error.Message);
             }
             if (!backupKnown || backupState == ExportPathState.File || !destinationKnown ||
-                destination.ExistedAtSelection && destinationState != ExportPathState.File)
+                destination.Intent == ExportWriteIntent.ConfirmedOverwrite && destinationState != ExportPathState.File)
             {
                 return new(StatisticsExportPhase.Failed, RecoveryPath: backup is not null && (!backupKnown || backupState == ExportPathState.File) ? backup : directory ?? temporary,
                     Error: "导出提交失败，文件状态无法完整确认；已保留本次恢复文件。" + error.Message);

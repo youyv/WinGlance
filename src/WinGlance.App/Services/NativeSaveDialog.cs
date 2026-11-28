@@ -78,9 +78,10 @@ internal static class NativeSaveDialog
             var type = Type.GetTypeFromCLSID(new Guid("C0B4E2F3-BA21-4773-8DBA-335EC946EB8B"), true)!;
             dialog = (IFileDialog)Activator.CreateInstance(type)!;
             dialog.GetOptions(out uint options);
-            // OVERWRITEPROMPT | STRICTFILETYPES | FORCEFILESYSTEM | PATHMUSTEXIST |
-            // NOTESTFILECREATE. A new destination is allowed; no test file is written.
-            dialog.SetOptions(options | 0x2 | 0x4 | 0x40 | 0x800 | 0x10000);
+            // Only choose a path. Clear the default OVERWRITEPROMPT: the application
+            // obtains explicit replacement consent after this modal dialog has closed.
+            // STRICTFILETYPES | FORCEFILESYSTEM | PATHMUSTEXIST | NOTESTFILECREATE.
+            dialog.SetOptions((options & ~0x2u) | 0x4 | 0x40 | 0x800 | 0x10000);
             dialog.SetFileTypes(1, [new FilterSpec(extension.ToUpperInvariant() + " 文件", "*." + extension)]);
             dialog.SetFileTypeIndex(1);
             dialog.SetDefaultExtension(extension);

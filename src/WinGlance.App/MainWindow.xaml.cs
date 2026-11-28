@@ -608,12 +608,10 @@ public sealed partial class MainWindow : Window
         if (_statisticsSelected == statistics || _exitStarted) return;
         if (statistics && _statisticsView is null)
         {
-            nint owner = WinRT.Interop.WindowNative.GetWindowHandle(this);
             _statisticsView = new StatisticsView(_statistics, _settings.HideSystem)
             {
                 ConfirmReset = ConfirmStatisticsResetAsync,
-                PickExportPath = (format, name, token) => NativeSaveDialog.PickAsync(owner, name,
-                    format == StatisticsExportFormat.Csv ? "csv" : "json", token)
+                PickExportDestination = PickExportDestinationAsync
             };
             _statisticsView.HideSystemChanged += hidden => { HideSystemToggle.IsOn = hidden; };
             _statisticsView.EnhancedRequested += () => { _ = _client.StartAsync(true); };
@@ -643,6 +641,66 @@ public sealed partial class MainWindow : Window
             visual.StartAnimation("Opacity", animation);
         }
     }
+    private async Task<StatisticsExportDestination?> PickExportDestinationAsync(
+        StatisticsExportFormat format, string name, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        if (_exitStarted) throw new OperationCanceledException(token);
+        if (_dialogOpen) throw new InvalidOperationException("请先关闭当前对话框，再导出统计。");
+        _dialogOpen = true;
+        try
+        {
+            nint owner = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            string suggested = name;
+            return await StatisticsExportSelection.SelectAsync(async cancellation =>
+            {
+                var path = await NativeSaveDialog.PickAsync(owner, suggested,
+                    format == StatisticsExportFormat.Csv ? "csv" : "json", cancellation);
+                if (path is not null && Path.GetFileName(path) is { Length: > 0 } filename) suggested = filename;
+                return path;
+            }, ConfirmExportOverwriteAsync, token);
+        }
+        finally { _dialogOpen = false; }
+    }
+
+    private async Task<ExportOverwriteDecision> ConfirmExportOverwriteAsync(string path, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        if (_exitStarted) throw new OperationCanceledException(token);
+        if (_hidden) ShowMain();
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Root.XamlRoot, RequestedTheme = Root.ActualTheme, Title = "替换已有文件？",
+            Content = new TextBlock { Text = "此位置已有文件，替换后原内容将被新导出覆盖。\n\n" + path,
+                TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true, MaxWidth = 480 },
+            PrimaryButtonText = "替换", SecondaryButtonText = "另选位置", CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Close
+        };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(dialog, "ExportOverwriteDialog");
+        bool showing = true;
+        try
+        {
+            var pending = dialog.ShowAsync();
+            using var registration = token.Register(() => DispatcherQueue.TryEnqueue(() =>
+            {
+                // A callback queued before registration.Dispose can run after dismissal.
+                if (!showing) return;
+                try { dialog.Hide(); }
+                catch (Exception error) when (error is System.Runtime.InteropServices.COMException or ObjectDisposedException) { }
+            }));
+            var result = await pending;
+            token.ThrowIfCancellationRequested();
+            if (_exitStarted) throw new OperationCanceledException(token);
+            return result switch
+            {
+                ContentDialogResult.Primary => ExportOverwriteDecision.Replace,
+                ContentDialogResult.Secondary => ExportOverwriteDecision.Reselect,
+                _ => ExportOverwriteDecision.Cancel
+            };
+        }
+        finally { showing = false; }
+    }
+
     private async Task<bool> ConfirmStatisticsResetAsync(StatisticsRange range)
     {
         if (_dialogOpen) return false;

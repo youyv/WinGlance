@@ -164,33 +164,23 @@ Run-Case 'existing-path' {
     $script:current=Start-Case 'existing-path' $existing
     $window=Wait-SaveWindow $script:current
     Command $script:current $window 1
-    Wait-Condition {@(Dialogs $script:current).Count -gt 1} 'overwrite confirmation'
-    Save-DialogTree $script:current 'overwrite-tree'
-    $confirm=@(Dialogs $script:current | Where-Object {$_ -ne $window})[0]
-    Command $script:current $confirm 6
+    # The raw picker grants no overwrite permission; confirmation belongs to the app.
     $result=Wait-Result $script:current
     if($result.Status -ne 'Selected' -or $result.Path -ne $existing -or (Get-FileHash -LiteralPath $existing -Algorithm SHA256).Hash -ne $originalHash){throw 'Existing target changed during picker selection.'};$result
 }
-Run-Case 'overwrite-user-decline' {
-    $script:current=Start-Case 'overwrite-user-decline' $existing
+Run-Case 'existing-user-cancel' {
+    $script:current=Start-Case 'existing-user-cancel' $existing
     $window=Wait-SaveWindow $script:current
-    Command $script:current $window 1
-    Wait-Condition {@(Dialogs $script:current).Count -gt 1} 'overwrite confirmation'
-    $confirm=@(Dialogs $script:current | Where-Object {$_ -ne $window})[0]
-    Command $script:current $confirm 7
-    Wait-Condition {@(Dialogs $script:current).Count -eq 1} 'return to picker after decline'
     Command $script:current $window 2
     $result=Wait-Result $script:current
-    if($result.Status -ne 'UserCancelled' -or (Get-FileHash -LiteralPath $existing -Algorithm SHA256).Hash -ne $originalHash){throw 'Declining overwrite must preserve target.'};$result
+    if($result.Status -ne 'UserCancelled' -or (Get-FileHash -LiteralPath $existing -Algorithm SHA256).Hash -ne $originalHash){throw 'Cancelling selection must preserve target.'};$result
 }
-Run-Case 'overwrite-token-cancel' {
-    $signal=Join-Path $output 'overwrite-token-cancel/cancel.signal'
-    $script:current=Start-Case 'overwrite-token-cancel' $existing @('--cancel-file',$signal,'--no-diagnostics')
+Run-Case 'existing-token-cancel' {
+    $signal=Join-Path $output 'existing-token-cancel/cancel.signal'
+    $script:current=Start-Case 'existing-token-cancel' $existing @('--cancel-file',$signal,'--no-diagnostics')
     $window=Wait-SaveWindow $script:current
-    Command $script:current $window 1
-    Wait-Condition {@(Dialogs $script:current).Count -gt 1} 'overwrite confirmation'
     [IO.File]::WriteAllText($signal,'cancel')
     $result=Wait-Result $script:current
-    if($result.Status -ne 'TokenCancelled' -or (Get-FileHash -LiteralPath $existing -Algorithm SHA256).Hash -ne $originalHash){throw 'Cancelling overwrite must preserve target.'};$result
+    if($result.Status -ne 'TokenCancelled' -or (Get-FileHash -LiteralPath $existing -Algorithm SHA256).Hash -ne $originalHash){throw 'Cancelling selection must preserve target.'};$result
 }
 if(@($results | Where-Object {-not $_.Passed}).Count){throw 'Save dialog verification has failed cases; inspect report.json.'}
