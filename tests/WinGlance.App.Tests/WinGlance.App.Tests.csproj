@@ -19,6 +19,8 @@
     <Compile Include="../../src/WinGlance.App/Services/ConnectionDetailsMonitor.cs" Link="ConnectionDetailsMonitor.cs" />
     <Compile Include="../../src/WinGlance.App/Services/ConnectionDetailsPresentation.cs" Link="ConnectionDetailsPresentation.cs" />
     <Compile Include="../../src/WinGlance.App/Services/EndpointCandidates.cs" Link="EndpointCandidates.cs" />
+    <Compile Include="../../src/WinGlance.App/Services/NativeSaveDialog.cs" Link="NativeSaveDialog.cs" />
+    <Compile Include="../../src/WinGlance.App/Services/ConnectionListFilter.cs" Link="ConnectionListFilter.cs" />
     <Compile Include="../../src/WinGlance.App/Services/AppPaths.cs" Link="AppPaths.cs" />
   </ItemGroup>
 </Project>

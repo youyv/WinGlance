@@ -20,6 +20,7 @@ public sealed partial class MainWindow : Window
     private readonly ConnectionDetailsMonitor _connections = new();
     private IReadOnlyList<ProcessConnection> _connectionRows = [];
     private readonly ConnectionDetailsPresentation _connectionView = new();
+    private MenuFlyout? _connectionMenu;
     private readonly ObservableCollection<SoftwareRow> _rows = [];
     private readonly LiveSnapshotStore _live = new();
     private int _uiQueued;
@@ -298,13 +299,16 @@ public sealed partial class MainWindow : Window
 
     private void UpdateConnectionDetails()
     {
+        if (!string.Equals(_connectionView.OwnerKey, _selectedKey, StringComparison.Ordinal))
+        { _connectionMenu?.Hide(); _connectionMenu = null; ConnectionCopyNotice.Text = ""; }
         var read = _client.ReadState();
         // Identity membership stays current even while the displayed values are frozen.
-        var selected = read.Frame?.Software.FirstOrDefault(s => s.Key == _selectedKey);
-        var state = CollectionPresentation.Create(read.Connection, _displayedFrame, _paused);
+        var state = CollectionPresentation.Create(read.Connection, read.Frame, _paused);
+        var selected = state.IsLive ? read.Frame?.Software.FirstOrDefault(s => s.Key == _selectedKey) : null;
         string? unavailable = !state.IsLive ? state.CompactStatus : _paused ? "连接详情已暂停" : null;
         _connectionView.Select(_selectedKey, selected?.Processes.Select(p => p.Identity),
-            !_hidden && !_statisticsSelected && !_exitStarted && DetailPanel.Visibility == Visibility.Visible, unavailable);
+            !_hidden && !_statisticsSelected && !_exitStarted && DetailPanel.Visibility == Visibility.Visible, unavailable,
+            membershipKnown: state.IsLive);
         if (_connectionView.CanQuery && selected is not null)
             _connectionView.BindQuery(_connections.Activate(selected.Key, selected.Processes.Select(p => p.Identity)));
         else _connections.Deactivate();
@@ -313,16 +317,64 @@ public sealed partial class MainWindow : Window
 
     private void ClearConnectionDetails()
     {
+        _connectionMenu?.Hide(); _connectionMenu = null;
+        ConnectionCopyNotice.Text = "";
         _connections.Deactivate(); _connectionView.Clear(); RenderConnectionDetails();
     }
 
     private void RenderConnectionDetails()
     {
-        if (!_connectionRows.SequenceEqual(_connectionView.Rows))
-        { _connectionRows = _connectionView.Rows; ConnectionsList.ItemsSource = _connectionRows; }
+        if (ConnectionProtocol is null || ConnectionState is null || ConnectionFilterHint is null) return;
+        var filtered = ConnectionListFilter.Apply(_connectionView.Rows,
+            (ConnectionProtocolFilter)ConnectionProtocol.SelectedIndex, (ConnectionStateFilter)ConnectionState.SelectedIndex);
+        if (!_connectionRows.SequenceEqual(filtered))
+        { _connectionRows = filtered; ConnectionsList.ItemsSource = _connectionRows; }
         ConnectionHint.Text = _connectionView.Hint;
-        ConnectionEmpty.Text = _connectionView.EmptyMessage;
+        ConnectionFilterHint.Text = ConnectionListFilter.CountHint(_connectionView.Rows.Count, _connectionRows.Count);
+        ConnectionEmpty.Text = _connectionView.Rows.Count > 0 && _connectionRows.Count == 0
+            ? "已获取结果中没有符合筛选条件的连接" : _connectionView.EmptyMessage;
         ConnectionEmpty.Visibility = _connectionRows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void ConnectionFilter_Changed(object sender, SelectionChangedEventArgs e) => RenderConnectionDetails();
+
+    private void Connection_ContextRequested(UIElement sender, ContextRequestedEventArgs args)
+    {
+        if (sender is not FrameworkElement { DataContext: ProcessConnection row } target) return;
+        OpenConnectionMenu(target, row, args.TryGetPosition(target, out var position) ? position : null);
+        args.Handled = true;
+    }
+    private void Connection_RightTapped(object sender, RightTappedRoutedEventArgs args)
+    {
+        if (sender is not FrameworkElement { DataContext: ProcessConnection row } target) return;
+        OpenConnectionMenu(target, row, args.GetPosition(target));
+        args.Handled = true;
+    }
+    private void OpenConnectionMenu(FrameworkElement target, ProcessConnection row, Windows.Foundation.Point? position)
+    {
+        _connectionMenu?.Hide();
+        var menu = new MenuFlyout();
+        _connectionMenu = menu;
+        ConnectionCopyNotice.Text = "";
+        void Add(string title, ConnectionCopyField field)
+        {
+            // Capture the selected immutable row: refresh must not redirect a later click.
+            var text = ConnectionListFilter.CopyText(row, field);
+            var item = new MenuFlyoutItem { Text = title, IsEnabled = text is not null };
+            item.Click += (_, _) =>
+            {
+                if (text is null) return;
+                try { var data = new DataPackage(); data.SetText(text); Clipboard.SetContent(data); ConnectionCopyNotice.Text = "已复制"; }
+                catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or UnauthorizedAccessException)
+                { ConnectionCopyNotice.Text = "无法写入剪贴板，请稍后重试"; }
+            };
+            menu.Items.Add(item);
+        }
+        Add("复制本地端点", ConnectionCopyField.Local);
+        Add("复制远端端点", ConnectionCopyField.Remote);
+        Add("复制整行", ConnectionCopyField.FullRow);
+        if (position is { } point) menu.ShowAt(target, new FlyoutShowOptions { Position = point });
+        else menu.ShowAt(target);
     }
 
     private void Process_ItemClick(object sender, ItemClickEventArgs e)

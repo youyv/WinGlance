@@ -315,6 +315,7 @@ await ExitOverlayRegression.Run(Check);
 OverlayAppearanceRegression.Run(Check);
 await ConnectionDetailsTests.Run(Check);
 EndpointCandidateRegression.Run(Check);
+ConnectionListFilterTests.Run(Check);
 Check(StartupRegistration.BuildCommand(@"C:\Some Folder\WinGlance.App.exe", true) == "\"C:\\Some Folder\\WinGlance.App.exe\" --minimized",
     "silent startup quotes the executable and keeps its argument outside the quotes");
 Check(StartupRegistration.ShouldHideOnLaunch(["--minimized"], true) &&

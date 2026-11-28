@@ -15,11 +15,21 @@ internal sealed class ConnectionDetailsPresentation
     public bool CanQuery { get; private set; }
     public string Hint { get; private set; } = "展开详情时按需查询";
     public string EmptyMessage { get; private set; } = "";
+    public string SourceDescription { get; private set; } = "";
 
-    public void Select(string? owner, IEnumerable<ProcessIdentity>? identities, bool visible, string? unavailable)
+    public void Select(string? owner, IEnumerable<ProcessIdentity>? identities, bool visible, string? unavailable,
+        bool membershipKnown = true)
     {
         if (!visible || owner is null) { Clear(); return; }
         if (!string.Equals(OwnerKey, owner, StringComparison.Ordinal)) { Clear(); OwnerKey = owner; }
+        // No current fresh frame means membership is unknown, not that the app exited.
+        if (!membershipKnown)
+        {
+            CanQuery = false; QueryGeneration = -1;
+            Hint = (unavailable ?? "等待当前采集数据") + HistorySuffix;
+            EmptyMessage = "收到当前采集数据后查询应用连接";
+            return;
+        }
         var members = identities?.Distinct().OrderBy(x => x.Pid).ThenBy(x => x.StartTimeUtcTicks).ToArray() ?? [];
         bool changed = !_members.SequenceEqual(members);
         if (changed)
@@ -32,7 +42,7 @@ internal sealed class ConnectionDetailsPresentation
         CanQuery = unavailable is null && members.Length > 0;
         if (members.Length == 0)
         {
-            Rows = []; ObservedAt = null; QueryGeneration = -1;
+            Rows = []; ObservedAt = null; SourceDescription = ""; QueryGeneration = -1;
             Hint = "应用已退出"; EmptyMessage = "当前没有可查询的进程";
         }
         else if (unavailable is not null)
@@ -63,6 +73,7 @@ internal sealed class ConnectionDetailsPresentation
         }
         if (!Rows.SequenceEqual(result.Connections)) Rows = result.Connections;
         ObservedAt = result.ObservedAt;
+        SourceDescription = result.Description;
         Hint = result.Description;
         EmptyMessage = result.EmptyMessage;
         return true;
@@ -71,8 +82,10 @@ internal sealed class ConnectionDetailsPresentation
     public void Clear()
     {
         OwnerKey = null; _members = []; Rows = []; ObservedAt = null; QueryGeneration = -1;
+        SourceDescription = "";
         CanQuery = false; Hint = "展开详情时按需查询"; EmptyMessage = "";
     }
 
-    private string HistorySuffix => ObservedAt is { } observed ? $" · 上次观测 {observed.LocalDateTime:HH:mm:ss}" : "";
+    private string HistorySuffix => ObservedAt is { } observed
+        ? $" · 上次观测 {observed.LocalDateTime:HH:mm:ss}" + (SourceDescription.Length > 0 ? "\n" + SourceDescription : "") : "";
 }
