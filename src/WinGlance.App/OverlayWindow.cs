@@ -24,6 +24,7 @@ public sealed class OverlayWindow : Window
     private WindowActivationState _activation = WindowActivationState.Deactivated;
     private bool _closed;
     private bool _visible;
+    private bool _hasBeenShown;
     private bool _preparingToExit;
     private bool _interactionFallback;
     private XamlRoot? _xamlRoot;
@@ -190,7 +191,7 @@ public sealed class OverlayWindow : Window
             _visible = true;
             bool applied = ApplyAppearance(out error);
             RecoverPosition();
-            if (!_closed && _clickThrough is null) Activate();
+            if (!_closed && _clickThrough is null) ShowWithoutStealingFocus();
             ScheduleRecovery();
             RecordBackdropState("shown");
             return applied;
@@ -209,6 +210,11 @@ public sealed class OverlayWindow : Window
         }
     }
     private void CloseButton_Click(object sender, RoutedEventArgs args) => HideOverlay();
+    private void ShowWithoutStealingFocus()
+    {
+        if (!_hasBeenShown) { Activate(); _hasBeenShown = true; }
+        else AppWindow.Show(false);
+    }
     public void HideOverlay()
     {
         if (!_visible || _closed || _preparingToExit) return;
@@ -295,7 +301,7 @@ public sealed class OverlayWindow : Window
             _clickThrough.Dispose(); _clickThrough = null;
         }
         if (error is not null) _interactionFallback = true;
-        if (_visible && !_closed && !_preparingToExit) { RecoverPosition(); Activate(); }
+        if (_visible && !_closed && !_preparingToExit) { RecoverPosition(); ShowWithoutStealingFocus(); }
         if (changed) ClickThroughChanged?.Invoke(false);
         if (error is not null) AppearanceFailed?.Invoke(error);
     }
