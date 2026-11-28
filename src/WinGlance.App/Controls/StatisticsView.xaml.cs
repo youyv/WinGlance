@@ -19,6 +19,9 @@ public sealed partial class StatisticsView : UserControl
     private StatisticsExportOperation? _exportOperation;
     private bool _exportStopping;
     private StatisticsSnapshot? _snapshot;
+    private CollectionPresentation? _collectionState;
+    private string? _coverageNotice;
+    private bool _coverageWarning, _queryFailed;
     private bool _ready, _active, _refreshing, _refreshAgain, _resetting, _descending = true;
     private int _version;
     private string _view = "overview", _sort = "first";
@@ -61,6 +64,7 @@ public sealed partial class StatisticsView : UserControl
     }
     internal void SetCollectionState(CollectionPresentation state)
     {
+        _collectionState = state;
         StatsEnhancedButton.Content = state.Label;
         StatsEnhancedButton.IsEnabled = state.CanEnhance;
         StatsReconnectButton.IsEnabled = state.CanReconnect;
@@ -68,6 +72,7 @@ public sealed partial class StatisticsView : UserControl
         CollectionStatus.Text = state.Live + " · " + state.Status;
         CollectionNotice.Message = state.Notice ?? "";
         CollectionNotice.IsOpen = state.Notice is not null;
+        RenderRecordingNotice();
     }
     private void CollectionNotice_CloseButtonClick(InfoBar sender, object args) => CollectionNoticeDismissed?.Invoke();
     private void Reconnect_Click(object sender, RoutedEventArgs e) => ReconnectRequested?.Invoke();
@@ -92,7 +97,7 @@ public sealed partial class StatisticsView : UserControl
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            if (_active) { Notice.Title = "统计暂不可用"; Notice.Message = ex.Message; Notice.Severity = InfoBarSeverity.Error; Notice.IsOpen = true; }
+            if (_active) { _queryFailed = true; Notice.Title = "统计暂不可用"; Notice.Message = ex.Message; Notice.Severity = InfoBarSeverity.Error; Notice.IsOpen = true; }
         }
         finally
         {
@@ -129,12 +134,11 @@ public sealed partial class StatisticsView : UserControl
             ToolTipService.SetToolTip(element, "一秒采样峰值" + StatisticsDisplay.PeakTime(metric));
         var partial = snapshot.Applications.Any(a => a.Metrics.GetValueOrDefault(StatisticMetric.Download)?.Bytes is not null);
         string? notice = snapshot.Warning;
-        if (!partial) notice = Join(notice, "单应用网络与磁盘需要开启增强采集；整机统计和 CPU / 内存已正常累计。");
+        if (!partial) notice = Join(notice, "单应用网络与磁盘需要开启增强采集；整机和 CPU / 内存按有效采集区间累计。");
         else if (snapshot.Applications.Any(a => a.Metrics.GetValueOrDefault(StatisticMetric.Download)?.Coverage < .99))
             notice = Join(notice, "应用流量仅覆盖增强采集可用的时段；过去未采集的数据无法补回。");
-        if (snapshot.LastRecordedUtc is { } last && DateTimeOffset.UtcNow - last > TimeSpan.FromSeconds(6))
-            notice = Join(notice, "采集暂未更新，累计值保留至最后一次有效观测。");
-        Notice.Title = "统计覆盖"; Notice.Message = notice ?? ""; Notice.Severity = snapshot.Warning is null ? InfoBarSeverity.Informational : InfoBarSeverity.Warning; Notice.IsOpen = !string.IsNullOrEmpty(notice);
+        _coverageNotice = notice; _coverageWarning = snapshot.Warning is not null; _queryFailed = false;
+        RenderRecordingNotice();
         SaveStatus.Text = (snapshot.LastSavedUtc is { } saved ? $"已保存 {saved.LocalDateTime:HH:mm:ss}" : "等待首次保存") + " · 每 30 秒保存 · 历史保留 7 天" + (snapshot.LastResetUtc is { } reset ? $" · 上次重置 {reset.LocalDateTime:MM-dd HH:mm:ss}" : "");
         string quality = "仅统计 WinGlance 运行期间；系统筛选不改变整机统计及排行占比分母。";
         if (snapshot.EtwQuality is { } q)
@@ -144,6 +148,17 @@ public sealed partial class StatisticsView : UserControl
         }
         quality += "\n网络整机与应用口径不同；专用 / 共享显存分别统计，应用显存可能含重复映射。";
         QualityLabel.Text = quality;
+    }
+    private void RenderRecordingNotice()
+    {
+        if (_queryFailed) return;
+        var notice = StatisticsNoticePresentation.Create(_coverageNotice, _coverageWarning,
+            _collectionState, _service.ReadRecordingProgress());
+        var severity = notice.IsWarning ? InfoBarSeverity.Warning : InfoBarSeverity.Informational;
+        if (Notice.Title != "统计覆盖") Notice.Title = "统计覆盖";
+        if (Notice.Message != notice.Message) Notice.Message = notice.Message;
+        if (Notice.Severity != severity) Notice.Severity = severity;
+        if (Notice.IsOpen != (notice.Message.Length > 0)) Notice.IsOpen = notice.Message.Length > 0;
     }
     private static string Join(string? first, string second) => string.IsNullOrEmpty(first) ? second : first + "\n" + second;
     private static string CapacityPercent(double? value, long? capacity, string prefix = " · ") => value is { } v && capacity > 0 ? prefix + $"{v / capacity:P1}" : "";

@@ -349,6 +349,7 @@ tests.AddRange(CatalogCleanupTests.Cases);
 tests.AddRange(OptimizationRegressionTests.Cases);
 tests.AddRange(StatisticsExportTests.Cases);
 tests.AddRange(ExportSelectionTests.Cases);
+tests.AddRange(StatisticsRecordingProgressTests.Cases);
 int failed = 0;
 foreach (var (name, run) in tests)
 {

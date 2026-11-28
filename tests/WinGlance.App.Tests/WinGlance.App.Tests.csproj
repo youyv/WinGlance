@@ -8,6 +8,7 @@
     <ProjectReference Include="../../src/WinGlance.Statistics/WinGlance.Statistics.csproj" />
     <Compile Include="../../src/WinGlance.App/Services/CollectorClient.cs" Link="CollectorClient.cs" />
     <Compile Include="../../src/WinGlance.App/Services/CollectionPresentation.cs" Link="CollectionPresentation.cs" />
+    <Compile Include="../../src/WinGlance.App/Services/StatisticsNoticePresentation.cs" Link="StatisticsNoticePresentation.cs" />
     <Compile Include="../../src/WinGlance.App/Services/StartupRegistration.cs" Link="StartupRegistration.cs" />
     <Compile Include="../../src/WinGlance.App/Services/SessionEndCoordinator.cs" Link="SessionEndCoordinator.cs" />
     <Compile Include="../../src/WinGlance.App/Services/ProcessPresentation.cs" Link="ProcessPresentation.cs" />

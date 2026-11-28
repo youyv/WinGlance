@@ -6,6 +6,20 @@ namespace WinGlance.App.Services;
 internal sealed record CollectionPresentation(string Label, bool CanEnhance, bool CanReconnect,
     string Live, string Status, string? Notice, bool IsLive, string CompactStatus, DateTimeOffset? LastObservedUtc)
 {
+    // A paused overview owns its displayed timestamp, but never owns connection freshness.
+    internal CollectionPresentation WithOverviewDisplay(bool paused, LiveFrame? displayedFrame)
+    {
+        if (!paused) return this;
+        string displayed = displayedFrame is { } frame
+            ? $"展示停留在 {frame.Snapshot.Timestamp.LocalDateTime:HH:mm:ss} · {frame.Snapshot.Processes.Count} 个进程"
+            : "暂无已展示数据";
+        return this with
+        {
+            Live = IsLive ? "显示已暂停" : Live,
+            Status = IsLive ? displayed + " · 显示已暂停，后台采集继续" : Status + " · " + displayed + "（显示已暂停）"
+        };
+    }
+
     internal static CollectionPresentation Create(CollectorConnection connection, LiveFrame? frame, bool paused)
     {
         var snapshot = frame?.Snapshot;

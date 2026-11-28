@@ -16,6 +16,7 @@ public sealed partial class StatisticsService : IAsyncDisposable
     private readonly string _databasePath;
     private readonly TimeZoneInfo _timeZone;
     private readonly TimeProvider _clock;
+    private readonly StatisticsRecordingTracker _recording;
     private readonly Guid _sessionId;
     private readonly string _sessionKey;
     private readonly DateTimeOffset _startedUtc;
@@ -55,6 +56,7 @@ public sealed partial class StatisticsService : IAsyncDisposable
         _databasePath = Path.GetFullPath(databasePath);
         _timeZone = timeZone ?? TimeZoneInfo.Local;
         _clock = timeProvider ?? TimeProvider.System;
+        _recording = new(_clock);
         _sessionId = sessionId ?? Guid.NewGuid();
         _sessionKey = _sessionId.ToString("N");
         _startedUtc = _clock.GetUtcNow();
@@ -63,6 +65,8 @@ public sealed partial class StatisticsService : IAsyncDisposable
     }
 
     public Guid SessionId => _sessionId;
+
+    public StatisticsRecordingProgress ReadRecordingProgress() => _recording.Read();
 
     public bool Accept(MonitorSnapshot snapshot)
     {
@@ -173,7 +177,8 @@ public sealed partial class StatisticsService : IAsyncDisposable
     private void Process(MonitorSnapshot snapshot)
     {
         var frame = snapshot.Accounting!;
-        if (frame.Sequence < 0 || _sequences.TryGetValue(frame.CollectorRunId, out var previous) && frame.Sequence <= previous) return;
+        bool knownCollector = _sequences.TryGetValue(frame.CollectorRunId, out var previous);
+        if (frame.Sequence < 0 || knownCollector && frame.Sequence <= previous) return;
         _queryCache.Clear(); _distributionCache.Clear();
         _sequences[frame.CollectorRunId] = frame.Sequence;
         var running = snapshot.Processes.Select(p => AppId(p.Software, p.Identity, frame.CollectorRunId)).ToHashSet();
@@ -191,6 +196,7 @@ public sealed partial class StatisticsService : IAsyncDisposable
         }
         if (frame.Discontinuity)
         {
+            _recording.BeginBaseline(!knownCollector);
             if (frame.DiscontinuityReason?.StartsWith("首次采样", StringComparison.Ordinal) != true)
                 _warning = $"{LocalWarningTime(frame.EndUtc)} 发生采集中断，该时段未计入统计：{frame.DiscontinuityReason ?? "采集区间不连续"}";
             return;
@@ -243,6 +249,7 @@ public sealed partial class StatisticsService : IAsyncDisposable
             }
         }
         _lastRecorded = frame.EndUtc;
+        _recording.Recorded(frame.EndUtc);
     }
 
     private void AddObserved(string entity, DateTimeOffset start, DateTimeOffset end, double seconds, EtwQualityAccounting? quality)

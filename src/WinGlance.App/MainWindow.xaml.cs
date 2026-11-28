@@ -729,8 +729,8 @@ public sealed partial class MainWindow : Window
         if (_exitStarted) return;
         var read = _client.ReadState();
         var state = read.Connection;
-        var presentation = CollectionPresentation.Create(state, _displayedFrame, _paused);
         var collection = CollectionPresentation.Create(state, read.Frame, false);
+        var presentation = collection.WithOverviewDisplay(_paused, _displayedFrame);
         EnhancedButton.Content = presentation.Label;
         EnhancedButton.IsEnabled = presentation.CanEnhance;
         ReconnectButton.IsEnabled = presentation.CanReconnect;

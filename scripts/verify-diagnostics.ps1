@@ -30,6 +30,13 @@ function WaitFor([scriptblock]$test, [int]$seconds=30) {
 }
 function Element($id) { $script:root.FindFirst($tree,[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::AutomationIdProperty,$id)) }
 function Text($id) { $element = Element $id; if ($element) { $element.Current.Name } else { '' } }
+function StatisticsNoticeText {
+ $notice = Element 'Notice'
+ if (-not $notice) { return '' }
+ $names = @($notice.Current.Name)
+ foreach ($child in $notice.FindAll($tree,[System.Windows.Automation.Condition]::TrueCondition)) { $names += $child.Current.Name }
+ return $names -join ' '
+}
 function Invoke($id) { (Element $id).GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); Start-Sleep -Milliseconds 300 }
 function SelectApp([string]$name) {
  (Element 'SearchBox').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($name)
@@ -102,12 +109,33 @@ try {
  Remove-Item -LiteralPath (Join-Path $directory 'exit001')
  SelectApp '诊断应用 000'
  WaitFor { (Text 'ConnectionHint') -like '40 条端点*' } | Out-Null
+ Invoke 'PauseButton'
+ $reconnectPausedStatus = Text 'StatusLabel'
+ Invoke 'ReconnectButton'
+ WaitFor { (Text 'LiveLabel') -eq '显示已暂停' } | Out-Null
+ Assert ((Text 'StatusLabel') -eq $reconnectPausedStatus) 'paused reconnect retains frozen displayed time while the new generation becomes live'
+ Invoke 'StatisticsButton'
+ WaitFor { (Text 'CollectionStatus') -like '实时 · 1 秒*' } | Out-Null
+ Assert $true 'statistics uses live current generation while overview display is paused'
+ Invoke 'OverviewButton'
+ Assert ((Text 'LiveLabel') -eq '显示已暂停' -and (Text 'StatusLabel') -eq $reconnectPausedStatus) 'returning from statistics preserves paused display with fresh channel state'
+ [SmokeNative]::PostMessage($handle,0x10,[IntPtr]0,[IntPtr]0) | Out-Null
+ Start-Sleep -Milliseconds 350
+ [SmokeNative]::PostMessage($handle,0x8001,[IntPtr]1,[IntPtr]0x202) | Out-Null
+ Start-Sleep -Milliseconds 500
+ Assert ((Text 'LiveLabel') -eq '显示已暂停' -and (Text 'StatusLabel') -eq $reconnectPausedStatus) 'tray restore preserves paused display after reconnect'
+ Invoke 'PauseButton'
+ WaitFor { (Text 'LiveLabel') -eq '实时 · 1 秒' } | Out-Null
+ SelectApp '诊断应用 000'
+ WaitFor { (Text 'ConnectionHint') -like '40 条端点*' } | Out-Null
  Invoke 'OverlayButton'
  New-Item -ItemType File -Path (Join-Path $directory 'stall') | Out-Null
  WaitFor { (Text 'LiveLabel') -eq '等待新数据' } | Out-Null
  Assert ((Text 'ConnectionHint') -like '*上次观测*') 'stalled endpoint rows are labelled with last observation'
  Invoke 'StatisticsButton'
  Assert ((Text 'CollectionStatus') -like '*等待新数据*') 'statistics shares stalled collection state'
+ WaitFor { (StatisticsNoticeText) -like '*统计超过 6 秒未入账*' } | Out-Null
+ Assert $true 'statistics independently reports missing accounting progress after six seconds'
  Invoke 'OverviewButton'
  Remove-Item -LiteralPath (Join-Path $directory 'stall')
  WaitFor { (Text 'LiveLabel') -eq '实时 · 1 秒' } | Out-Null

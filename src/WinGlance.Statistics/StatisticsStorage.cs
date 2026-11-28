@@ -364,6 +364,7 @@ public sealed partial class StatisticsService
         foreach (var key in _pending.Keys.Where(key => InRange(key, range, first, last)).ToArray()) _pending.Remove(key);
         _lastReset = now; _resetCutoff = now;
         _lastRecorded = null;
+        _recording.Reset();
         _coverageEnds.Clear(); _dirtyCoverage.Clear();
         _storedReadCache.Clear(); _queryCache.Clear();
         CompleteCatalogCleanup(removed, now);
