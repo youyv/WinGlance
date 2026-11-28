@@ -16,6 +16,8 @@ internal sealed class OverlayAcrylicBackdrop : SystemBackdrop
     private bool _notificationQueued;
     private string _notificationReason = "initialized";
     private double _opacity = .8;
+    private bool _dark;
+    private (bool Dark, double Opacity)? _appliedAppearance;
 
     internal void SetOpacity(double opacity)
     {
@@ -25,8 +27,15 @@ internal sealed class OverlayAcrylicBackdrop : SystemBackdrop
     private void ApplyOpacity()
     {
         if (_controller is null) return;
+        if (_appliedAppearance == (_dark, _opacity)) return;
+        // Custom opacity disables automatic light/dark defaults in the controller.
+        // Keep both tint and solid fallback in sync with the WinUI source theme.
+        var color = _dark ? Windows.UI.Color.FromArgb(255, 32, 32, 32) : Windows.UI.Color.FromArgb(255, 243, 243, 243);
+        _controller.TintColor = color;
+        _controller.FallbackColor = color;
         _controller.TintOpacity = (float)_opacity;
         _controller.LuminosityOpacity = (float)_opacity;
+        _appliedAppearance = (_dark, _opacity);
     }
 
     public string Status { get; private set; } = "NotConnected";
@@ -88,6 +97,8 @@ internal sealed class OverlayAcrylicBackdrop : SystemBackdrop
             // mutate the framework's default configuration or recurse through its callbacks.
             var source = GetDefaultSystemBackdropConfiguration(target, xamlRoot);
             _configuration.Theme = source.Theme;
+            _dark = source.Theme == SystemBackdropTheme.Dark || source.Theme == SystemBackdropTheme.Default &&
+                xamlRoot.Content is FrameworkElement element && element.ActualTheme == ElementTheme.Dark;
             _configuration.HighContrastBackgroundColor = source.HighContrastBackgroundColor;
             _configuration.IsHighContrast = HighContrast = source.IsHighContrast;
             _configuration.IsInputActive = true;
@@ -125,6 +136,7 @@ internal sealed class OverlayAcrylicBackdrop : SystemBackdrop
         var controller = _controller;
         var target = _target;
         _controller = null;
+        _appliedAppearance = null;
         _target = null;
         _configuration = null;
         State = "Unavailable";

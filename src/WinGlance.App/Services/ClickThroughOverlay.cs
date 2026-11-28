@@ -63,10 +63,11 @@ internal sealed class ClickThroughOverlay : IDisposable
         }
     }
 
-    internal void Render(string text, bool dark, bool highContrast, double opacity, int x, int y, double scale)
+    internal void Render(OverlayPresentation presentation, bool dark, bool highContrast, double opacity, int x, int y, double scale)
     {
         if (Handle == 0) throw new ObjectDisposedException(nameof(ClickThroughOverlay));
-        var size = OverlayPlacement.SizeForScale(scale);
+        string text = presentation.Text;
+        var size = OverlayPlacement.SizeForScale(scale, presentation.WidthDip, presentation.HeightDip);
         if (_width != size.Width || _height != size.Height || _scale != scale)
         {
             CreateSurface(size.Width, size.Height, scale);
@@ -79,8 +80,17 @@ internal sealed class ClickThroughOverlay : IDisposable
         {
             Array.Clear(_pixels);
             Marshal.Copy(_pixels, 0, _bits, _pixels.Length);
-            var rectangle = new Rect { Left = (int)Math.Ceiling(16 * scale), Right = _width - (int)Math.Ceiling(16 * scale), Bottom = _height };
-            DrawText(_dc, text, text.Length, ref rectangle, 0x20 | 0x4 | 0x800 | 0x8000);
+            var lines = text.Split('\n');
+            int lineHeight = (int)Math.Ceiling(OverlayPresentation.LineHeight * scale);
+            int top = Math.Max(0, (_height - lines.Length * lineHeight) / 2);
+            foreach (var line in lines)
+            {
+                var rectangle = new Rect { Left = (int)Math.Ceiling(16 * scale), Top = top,
+                    Right = _width - (int)Math.Ceiling((OverlayPresentation.HorizontalChrome - 16) * scale), Bottom = top + lineHeight };
+                // Explicit shared line breaks; no truncation or renderer-dependent wrapping.
+                DrawText(_dc, line, line.Length, ref rectangle, 0x20 | 0x4 | 0x800);
+                top += lineHeight;
+            }
             GdiFlush(); // DIB pixels must not be read while GDI is still drawing into them.
             Marshal.Copy(_bits, _pixels, 0, _pixels.Length);
             uint background = highContrast ? FromColorRef(GetSysColor(5)) : dark ? 0x202020u : 0xF3F3F3u;
@@ -120,7 +130,7 @@ internal sealed class ClickThroughOverlay : IDisposable
             if (_bitmap == 0 || _bits == 0) throw new Win32Exception(Marshal.GetLastWin32Error());
             _oldBitmap = SelectObject(_dc, _bitmap);
             _font = CreateFont(-(int)Math.Ceiling(12 * scale), 0, 0, 0, 400,
-                0, 0, 0, 1, 0, 0, 4, 0, "Segoe UI");
+                0, 0, 0, 1, 0, 0, 4, 0, "Consolas");
             if (_font == 0) throw new Win32Exception(Marshal.GetLastWin32Error());
             _oldFont = SelectObject(_dc, _font);
             SetTextColor(_dc, 0xFFFFFF);

@@ -11,6 +11,7 @@ public sealed class AppSettings
     public bool CloseToTray { get; set; } = true;
     public bool ShowOverlay { get; set; }
     public bool OverlayClickThrough { get; set; }
+    public OverlayPreset OverlayPreset { get; set; } = OverlayPreset.Standard;
     public double OverlayOpacity { get; set; } = .8;
     public int? OverlayX { get; set; }
     public int? OverlayY { get; set; }

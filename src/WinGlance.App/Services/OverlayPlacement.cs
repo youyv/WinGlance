@@ -4,11 +4,11 @@ internal readonly record struct WorkArea(int X, int Y, int Width, int Height);
 internal static class OverlayPlacement
 {
     // XAML dimensions are DIPs; AppWindow.Resize accepts physical pixels.
-    internal static (int Width, int Height) SizeForScale(double scale)
+    internal static (int Width, int Height) SizeForScale(double scale, double widthDip = 510, double heightDip = 58)
     {
         if (!double.IsFinite(scale) || scale <= 0) scale = 1;
         scale = Math.Clamp(scale, .5, 8);
-        return ((int)Math.Ceiling(510 * scale), (int)Math.Ceiling(58 * scale));
+        return ((int)Math.Ceiling(widthDip * scale), (int)Math.Ceiling(heightDip * scale));
     }
 
     internal static (int X, int Y) Recover(int x, int y, int width, int height, IReadOnlyList<WorkArea> areas)

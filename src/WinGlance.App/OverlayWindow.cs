@@ -29,6 +29,11 @@ public sealed class OverlayWindow : Window
     private bool _interactionFallback;
     private XamlRoot? _xamlRoot;
     private double _scale = 1;
+    private double _availableWidthDip = 510;
+    private SystemSample? _sample;
+    private bool _isLive;
+    private string _compactStatus = "等待数据";
+    private OverlayPresentation _presentation = OverlayPresentation.Create(OverlayPreset.Standard, null, false, "等待数据");
     private ClickThroughOverlay? _clickThrough;
     public bool IsClickThrough => _clickThrough is not null;
     public bool IsVisible => _visible && !_closed;
@@ -51,7 +56,7 @@ public sealed class OverlayWindow : Window
                 <Grid Padding="16,10,12,10">
                     <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                     <TextBlock x:Name="StatusText" Text="WinGlance · 等待采样" Foreground="{ThemeResource TextFillColorPrimaryBrush}"
-                               FontSize="12" VerticalAlignment="Center"/>
+                               FontFamily="Consolas" FontSize="12" LineHeight="20" LineStackingStrategy="BlockLineHeight" VerticalAlignment="Center"/>
                     <Button x:Name="CloseButton" Grid.Column="1" Content="×" Padding="6,0,6,0" Margin="12,0,0,0"
                             ToolTipService.ToolTip="关闭悬浮条" AutomationProperties.Name="关闭悬浮条"/>
                 </Grid>
@@ -133,11 +138,21 @@ public sealed class OverlayWindow : Window
             _fallback.Opacity = IsHighContrast() ? 1 : EffectiveOpacity;
             uint dpi = GetDpiForWindow(_clickThrough?.Handle ?? _windowHandle);
             _scale = dpi > 0 ? dpi / 96d : _root.XamlRoot?.RasterizationScale ?? 1;
-            var size = OverlayPlacement.SizeForScale(_scale);
+            var areas = DesktopWorkAreas.Get();
+            var anchor = _clickThrough?.Position ?? (AppWindow.Position.X, AppWindow.Position.Y);
+            var nearest = areas.OrderBy(area =>
+            {
+                double dx = Math.Clamp(anchor.X, area.X, area.X + area.Width) - (double)anchor.X;
+                double dy = Math.Clamp(anchor.Y, area.Y, area.Y + area.Height) - (double)anchor.Y;
+                return dx * dx + dy * dy;
+            }).FirstOrDefault();
+            _availableWidthDip = areas.Count == 0 ? 510 : nearest.Width / _scale;
+            RebuildPresentation();
+            var size = OverlayPlacement.SizeForScale(_scale, _presentation.WidthDip, _presentation.HeightDip);
             if (_clickThrough is not null)
             {
                 var currentNative = _clickThrough.Position;
-                var recovered = OverlayPlacement.Recover(currentNative.X, currentNative.Y, size.Width, size.Height, DesktopWorkAreas.Get());
+                var recovered = OverlayPlacement.Recover(currentNative.X, currentNative.Y, size.Width, size.Height, areas);
                 _clickThrough.Invalidate();
                 RenderClickThrough(recovered.X, recovered.Y);
                 return;
@@ -145,7 +160,7 @@ public sealed class OverlayWindow : Window
             if (AppWindow.Size.Width != size.Width || AppWindow.Size.Height != size.Height)
                 AppWindow.Resize(new Windows.Graphics.SizeInt32(size.Width, size.Height));
             var current = AppWindow.Position;
-            var position = OverlayPlacement.Recover(current.X, current.Y, size.Width, size.Height, DesktopWorkAreas.Get());
+            var position = OverlayPlacement.Recover(current.X, current.Y, size.Width, size.Height, areas);
             if (position.X != current.X || position.Y != current.Y)
                 AppWindow.Move(new Windows.Graphics.PointInt32(position.X, position.Y));
         }
@@ -238,6 +253,8 @@ public sealed class OverlayWindow : Window
         try
         {
             _settings.OverlayOpacity = EffectiveOpacity;
+            _settings.OverlayPreset = OverlayPresentation.Normalize(_settings.OverlayPreset);
+            RebuildPresentation();
             _backdrop.SetOpacity(_settings.OverlayOpacity);
             _fallback.Opacity = IsHighContrast() ? 1 : _settings.OverlayOpacity;
             if (!_visible) { RecordBackdropState("hidden-appearance-changed"); return true; }
@@ -256,6 +273,7 @@ public sealed class OverlayWindow : Window
                 if (newlyCreated) ClickThroughChanged?.Invoke(true);
             }
             else if (_clickThrough is not null) RecoverInteraction(null);
+            RecoverPosition();
             RecordBackdropState("appearance-changed");
             return true;
         }
@@ -271,7 +289,7 @@ public sealed class OverlayWindow : Window
         if (_clickThrough is null) return;
         uint dpi = GetDpiForWindow(_clickThrough.Handle);
         if (dpi > 0) _scale = dpi / 96d;
-        _clickThrough.Render(_text.Text, IsDarkTheme(), IsHighContrast(),
+        _clickThrough.Render(_presentation, IsDarkTheme(), IsHighContrast(),
             _settings.OverlayOpacity, x, y, _scale);
     }
     private void RefreshClickThrough()
@@ -365,6 +383,10 @@ public sealed class OverlayWindow : Window
                 RasterizationScale = _scale,
                 ClickThrough = IsClickThrough,
                 BackgroundOpacity = _settings.OverlayOpacity,
+                Preset = OverlayPresentation.Normalize(_settings.OverlayPreset).ToString(),
+                LayoutWidth = _presentation.WidthDip,
+                LayoutHeight = _presentation.HeightDip,
+                DisplayText = _presentation.Text,
                 RenderMode = IsClickThrough ? "NativeLayeredSolid" : "WinUIAcrylic"
             }, new JsonSerializerOptions { WriteIndented = true }));
         }
@@ -402,21 +424,32 @@ public sealed class OverlayWindow : Window
         catch (Exception ex) when (ex is COMException or ObjectDisposedException) { }
     }
 
+    private void RebuildPresentation()
+    {
+        _presentation = OverlayPresentation.Create(_settings.OverlayPreset, _sample, _isLive, _compactStatus, _availableWidthDip);
+        if (_text.Text != _presentation.Text) _text.Text = _presentation.Text;
+    }
+    private void PresentSample()
+    {
+        if (!_visible || _closed || _preparingToExit) return;
+        var previous = _presentation;
+        RebuildPresentation();
+        if (_presentation.WidthDip != previous.WidthDip || _presentation.HeightDip != previous.HeightDip)
+            RecoverPosition();
+        RefreshClickThrough();
+    }
     public void Update(SystemSample sample)
     {
-        if (!_visible || _closed || _preparingToExit) return;
-        _text.Text = $"↓ {Display.Rate(sample.DownloadBytesPerSecond)}   ↑ {Display.Rate(sample.UploadBytesPerSecond)}    CPU {Display.Percent(sample.CpuPercent)}   GPU {Display.Percent(sample.GpuPercent)}";
-        RefreshClickThrough();
+        if (_closed || _preparingToExit) return;
+        _sample = sample; _isLive = true; _compactStatus = "实时";
+        PresentSample();
     }
-
     internal void Update(SystemSample? sample, CollectionPresentation state)
     {
-        if (!_visible || _closed || _preparingToExit) return;
-        if (state.IsLive && sample is not null) { Update(sample); return; }
-        _text.Text = state.CompactStatus;
-        RefreshClickThrough();
+        if (_closed || _preparingToExit) return;
+        _sample = sample; _isLive = state.IsLive; _compactStatus = state.CompactStatus;
+        PresentSample();
     }
-
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint hwnd);
     [StructLayout(LayoutKind.Sequential)] private struct HighContrastInfo
     {

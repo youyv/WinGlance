@@ -786,9 +786,14 @@ public sealed partial class MainWindow : Window
             bool interactionEdited = false;
             clickThrough.Toggled += (_, _) => interactionEdited = true;
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(clickThrough, "OverlayClickThroughToggle");
+            var overlayPreset = new ComboBox { Header = "悬浮条内容", HorizontalAlignment = HorizontalAlignment.Stretch };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(overlayPreset, "OverlayPresetPicker");
+            overlayPreset.Items.Add("仅网速"); overlayPreset.Items.Add("标准"); overlayPreset.Items.Add("含内存"); overlayPreset.Items.Add("全部");
+            overlayPreset.SelectedIndex = OverlayPresentation.Normalize(_settings.OverlayPreset) switch
+            { OverlayPreset.Network => 0, OverlayPreset.Memory => 2, OverlayPreset.All => 3, _ => 1 };
             var opacity = new Slider { Header = "悬浮条背景不透明度", Minimum = 20, Maximum = 100, StepFrequency = 5, Value = Math.Clamp(_settings.OverlayOpacity * 100, 20, 100), TickFrequency = 20 };
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(opacity, "OverlayOpacitySlider");
-            panel.Children.Add(clickThrough); panel.Children.Add(opacity);
+            panel.Children.Add(overlayPreset); panel.Children.Add(clickThrough); panel.Children.Add(opacity);
             panel.Children.Add(new TextBlock { Text = "可从托盘菜单“恢复悬浮条交互”退出穿透。穿透时使用半透明底色；恢复交互后使用 Acrylic，滑块调整背景浓度，文字保持清晰。", TextWrapping = TextWrapping.Wrap, FontSize = 12, Style = (Style)Application.Current.Resources["Muted"] });
             panel.Children.Add(new TextBlock { Text = "刷新频率：1 秒\n趋势保留：60 秒\n进程内存：私有工作集\n增强采集仅提升采集器权限", TextWrapping = TextWrapping.Wrap, FontSize = 12 });
             var dialog = new ContentDialog { XamlRoot = Root.XamlRoot, RequestedTheme = Root.ActualTheme, Title = "设置", Content = new ScrollViewer { Content = panel, HorizontalScrollMode = ScrollMode.Disabled, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, MaxHeight = 580 }, PrimaryButtonText = "保存", CloseButtonText = "取消" };
@@ -808,16 +813,20 @@ public sealed partial class MainWindow : Window
                 var previousCloseToTray = _settings.CloseToTray;
                 var previousClickThrough = _settings.OverlayClickThrough;
                 var previousOpacity = _settings.OverlayOpacity;
+                var previousOverlayPreset = _settings.OverlayPreset;
                 _settings.Theme = theme.SelectedIndex switch { 1 => "Light", 2 => "Dark", _ => "System" };
                 _settings.CloseToTray = tray.IsOn;
                 _settings.OverlayClickThrough = clickThrough.IsOn;
                 _settings.OverlayOpacity = opacity.Value / 100;
+                _settings.OverlayPreset = overlayPreset.SelectedIndex switch
+                { 0 => OverlayPreset.Network, 2 => OverlayPreset.Memory, 3 => OverlayPreset.All, _ => OverlayPreset.Standard };
                 if (!_settings.TrySave(out var error))
                 {
                     _settings.Theme = previousTheme;
                     _settings.CloseToTray = previousCloseToTray;
                     _settings.OverlayClickThrough = previousClickThrough;
                     _settings.OverlayOpacity = previousOpacity;
+                    _settings.OverlayPreset = previousOverlayPreset;
                     args.Cancel = true;
                     startupNotice.Title = "设置未完全保存";
                     startupNotice.Severity = InfoBarSeverity.Error;

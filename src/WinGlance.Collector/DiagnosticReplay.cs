@@ -49,6 +49,15 @@ internal static class DiagnosticReplay
                 { Accounting = new(run, sequence++, start, end, 1, accounting,
                     new SystemAccounting(Metrics(18, 8589934592, 1048576, 131072, start, end), NetworkScope: "diagnostic",
                         TotalMemoryBytes: 17179869184, DedicatedGpuCapacityBytes: 8589934592)) };
+                // Isolated visual verification only: accounting remains the deterministic
+                // fixture above; this flag exercises display boundaries, never user data.
+                if (File.Exists(Path.Combine(directory, "large-overlay")))
+                {
+                    double rate = 1023.9 * Math.Pow(1024, 4);
+                    snapshot = snapshot with { System = snapshot.System with { CpuPercent = 100, GpuPercent = 100,
+                        DownloadBytesPerSecond = rate, UploadBytesPerSecond = rate,
+                        DiskReadBytesPerSecond = rate, DiskWriteBytesPerSecond = rate } };
+                }
                 await writer.WriteLineAsync(JsonSerializer.Serialize(snapshot));
             } while (await timer.WaitForNextTickAsync());
         }
