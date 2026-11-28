@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -43,6 +44,9 @@ public sealed partial class StatisticsService : IAsyncDisposable
     private string? _networkScope;
     private int _accepting = 1, _queuedSamples;
     private Exception? _fatalError;
+    private static long _nextDiagnosticId;
+    // Used only by the single writer; lets a reset's prerequisite flush share its request ID.
+    private long _activeDiagnosticId;
 
     public StatisticsService(string databasePath, TimeZoneInfo? timeZone = null, Guid? sessionId = null,
         TimeProvider? timeProvider = null)
@@ -66,13 +70,16 @@ public sealed partial class StatisticsService : IAsyncDisposable
         if (snapshot.Accounting is null || Volatile.Read(ref _accepting) == 0 || _fatalError is not null) return false;
         if (Interlocked.Increment(ref _queuedSamples) > 60)
         { Interlocked.Decrement(ref _queuedSamples); Volatile.Write(ref _warning, "统计队列已满，部分采集区间未记录。"); return false; }
-        if (_queue.Writer.TryWrite(new SampleWork(snapshot))) return true;
+        var work = new SampleWork(snapshot);
+        // Admission may run inside the collector lifecycle gate. Only capture the timestamp
+        // here; emit its queue latency from the worker, never invoke diagnostic listeners here.
+        if (_queue.Writer.TryWrite(work)) return true;
         Interlocked.Decrement(ref _queuedSamples);
         return false;
     }
 
     public Task<StatisticsSnapshot> QueryAsync(StatisticsRange range, CancellationToken cancellationToken = default) =>
-        Enqueue(() => Query(range), cancellationToken);
+        Enqueue(() => Query(range), cancellationToken, "query");
 
     public Task<ApplicationStatisticsDetail> QueryApplicationAsync(StatisticsRange range, string appId,
         CancellationToken cancellationToken = default) => Enqueue(() =>
@@ -80,21 +87,23 @@ public sealed partial class StatisticsService : IAsyncDisposable
             var snapshot = Query(range);
             return new ApplicationStatisticsDetail(snapshot.Applications.FirstOrDefault(app => app.AppId == appId),
                 ReadTrend(range, appId));
-        }, cancellationToken);
+        }, cancellationToken, "queryApplication");
 
     public Task ResetAsync(StatisticsRange range, CancellationToken cancellationToken = default) =>
-        Enqueue(() => { Reset(range); return true; }, cancellationToken);
+        Enqueue(() => { Reset(range); return true; }, cancellationToken, "reset", "reset");
 
     public Task FlushAsync(CancellationToken cancellationToken = default) =>
-        Enqueue(() => { Flush(); return true; }, cancellationToken);
+        Enqueue(() => { Flush("manual", _activeDiagnosticId); return true; }, cancellationToken, "flush", "manual");
 
-    private Task<T> Enqueue<T>(Func<T> action, CancellationToken cancellationToken)
+    private Task<T> Enqueue<T>(Func<T> action, CancellationToken cancellationToken, string operation, string? flushReason = null)
     {
         if (cancellationToken.IsCancellationRequested) return Task.FromCanceled<T>(cancellationToken);
         if (_fatalError is { } error) return Task.FromException<T>(new IOException("统计存储不可用。", error));
         if (Volatile.Read(ref _accepting) == 0) return Task.FromException<T>(new ObjectDisposedException(nameof(StatisticsService)));
-        var work = new RequestWork<T>(action);
-        if (!_queue.Writer.TryWrite(work)) return Task.FromException<T>(new ObjectDisposedException(nameof(StatisticsService)));
+        var work = new RequestWork<T>(action, operation, flushReason);
+        work.Queued();
+        if (!_queue.Writer.TryWrite(work))
+        { work.Rejected(); return Task.FromException<T>(new ObjectDisposedException(nameof(StatisticsService))); }
         return work.Completion.Task.WaitAsync(cancellationToken);
     }
 
@@ -104,7 +113,11 @@ public sealed partial class StatisticsService : IAsyncDisposable
         try
         {
             while (await timer.WaitForNextTickAsync(_timerStop.Token).ConfigureAwait(false))
-                if (!_queue.Writer.TryWrite(new FlushWork())) break;
+            {
+                var work = new FlushWork();
+                work.Queued();
+                if (!_queue.Writer.TryWrite(work)) { work.Rejected(); break; }
+            }
         }
         catch (OperationCanceledException) { }
     }
@@ -116,6 +129,8 @@ public sealed partial class StatisticsService : IAsyncDisposable
             Initialize();
             await foreach (var work in _queue.Reader.ReadAllAsync().ConfigureAwait(false))
             {
+                _activeDiagnosticId = work.DiagnosticId;
+                long executionStarted = work.Started();
                 try
                 {
                     switch (work)
@@ -124,25 +139,28 @@ public sealed partial class StatisticsService : IAsyncDisposable
                             Interlocked.Decrement(ref _queuedSamples);
                             Process(sample.Snapshot);
                             break;
-                        case FlushWork: Flush(); break;
+                        case FlushWork: Flush("periodic", work.DiagnosticId); break;
                         default: work.Execute(); break;
                     }
+                    work.Finished(executionStarted);
                 }
                 catch (Exception ex)
                 {
                     if (work is SampleWork failedSample)
                         _warning = $"{LocalWarningTime(failedSample.Snapshot.Accounting!.EndUtc)} 的统计帧未记录：{ex.Message}";
                     else _storageWarning = $"统计暂未完整保存：{ex.Message}";
+                    work.Failed(ex, executionStarted);
                     work.Fail(ex);
                 }
             }
-            Flush();
+            Flush("exit");
         }
         catch (Exception ex)
         {
             _fatalError = ex;
             _queue.Writer.TryComplete(ex);
-            while (_queue.Reader.TryRead(out var remaining)) remaining.Fail(ex);
+            while (_queue.Reader.TryRead(out var remaining))
+            { remaining.Failed(ex, 0); remaining.Fail(ex); }
         }
         finally { _connection?.Dispose(); }
     }
@@ -407,12 +425,50 @@ public sealed partial class StatisticsService : IAsyncDisposable
 
     private abstract record Work
     {
+        protected Work(string operation, string? flushReason = null)
+        {
+            Operation = operation; FlushReason = flushReason;
+            _queuedAt = DiagnosticTrace.Start();
+            DiagnosticId = _queuedAt == 0 ? 0 : Interlocked.Increment(ref _nextDiagnosticId);
+        }
+        private readonly long _queuedAt;
+        private string Operation { get; }
+        private string? FlushReason { get; }
+        public long DiagnosticId { get; }
+        public void Queued()
+        {
+            if (_queuedAt == 0) return;
+            DiagnosticTrace.Log.StatisticsWork("queued", Operation, DiagnosticId, 0, 0, "");
+            if (FlushReason is { } reason) DiagnosticTrace.Log.Flush("queued", reason, DiagnosticId, 0);
+        }
+        public long Started()
+        {
+            if (_queuedAt == 0) return 0;
+            long started = Stopwatch.GetTimestamp();
+            DiagnosticTrace.Log.StatisticsWork("start", Operation, DiagnosticId,
+                Stopwatch.GetElapsedTime(_queuedAt, started).TotalMilliseconds, 0, "");
+            return started;
+        }
+        public void Finished(long started)
+        {
+            if (started != 0) DiagnosticTrace.Log.StatisticsWork("finished", Operation, DiagnosticId,
+                Stopwatch.GetElapsedTime(started).TotalMilliseconds, this is SampleWork sample ? sample.Snapshot.Processes.Count : 0, "");
+        }
+        public void Failed(Exception exception, long started)
+        {
+            if (_queuedAt != 0) DiagnosticTrace.Log.StatisticsWork("failed", Operation, DiagnosticId,
+                started == 0 ? 0 : Stopwatch.GetElapsedTime(started).TotalMilliseconds, 0, exception.GetType().Name);
+        }
+        public void Rejected()
+        {
+            if (_queuedAt != 0) DiagnosticTrace.Log.StatisticsWork("rejected", Operation, DiagnosticId, 0, 0, "queueClosed");
+        }
         public virtual void Execute() { }
         public virtual void Fail(Exception exception) { }
     }
-    private sealed record SampleWork(MonitorSnapshot Snapshot) : Work;
-    private sealed record FlushWork : Work;
-    private sealed record RequestWork<T>(Func<T> Action) : Work
+    private sealed record SampleWork(MonitorSnapshot Snapshot) : Work("sample");
+    private sealed record FlushWork() : Work("flush", "periodic");
+    private sealed record RequestWork<T>(Func<T> Action, string Name, string? Reason) : Work(Name, Reason)
     {
         public TaskCompletionSource<T> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public override void Execute() => Completion.TrySetResult(Action());

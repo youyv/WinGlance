@@ -12,6 +12,8 @@ internal sealed class SingleInstance : IDisposable
     public static SingleInstance? Acquire()
     {
         string key = @"Global\WinGlance." + WindowsIdentity.GetCurrent().User!.Value;
+        if (AppPaths.IsDiagnostic)
+            key += ".diagnostic." + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(AppPaths.DataDirectory.ToUpperInvariant())))[..16];
         var mutex = new Mutex(true, key + ".owner", out bool created);
         var activation = new EventWaitHandle(false, EventResetMode.AutoReset, key + ".activate");
         bool acquired = created;

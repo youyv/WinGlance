@@ -5,6 +5,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/WinGlance.Core/WinGlance.Core.csproj" />
+    <ProjectReference Include="../../src/WinGlance.Statistics/WinGlance.Statistics.csproj" />
     <Compile Include="../../src/WinGlance.App/Services/CollectorClient.cs" Link="CollectorClient.cs" />
     <Compile Include="../../src/WinGlance.App/Services/CollectionPresentation.cs" Link="CollectionPresentation.cs" />
     <Compile Include="../../src/WinGlance.App/Services/StartupRegistration.cs" Link="StartupRegistration.cs" />
@@ -16,5 +17,8 @@
     <Compile Include="../../src/WinGlance.App/Services/LiveSnapshotStore.cs" Link="LiveSnapshotStore.cs" />
     <Compile Include="../../src/WinGlance.App/Services/IpHelperConnections.cs" Link="IpHelperConnections.cs" />
     <Compile Include="../../src/WinGlance.App/Services/ConnectionDetailsMonitor.cs" Link="ConnectionDetailsMonitor.cs" />
+    <Compile Include="../../src/WinGlance.App/Services/ConnectionDetailsPresentation.cs" Link="ConnectionDetailsPresentation.cs" />
+    <Compile Include="../../src/WinGlance.App/Services/EndpointCandidates.cs" Link="EndpointCandidates.cs" />
+    <Compile Include="../../src/WinGlance.App/Services/AppPaths.cs" Link="AppPaths.cs" />
   </ItemGroup>
 </Project>

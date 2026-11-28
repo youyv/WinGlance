@@ -11,7 +11,7 @@ namespace WinGlance.Windows.Identity;
 internal static class ShellIconCache
 {
     private const int MaximumFiles = 512;
-    private static readonly string CacheDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinGlance", "Icons");
+    private static readonly string CacheDirectory = Path.Combine(WinGlance.Core.LocalDataPaths.DataDirectory, "Icons");
 
     public static string? Extract(string filePath, long modifiedTicks, long fileLength, long createdTicks = 0)
     {

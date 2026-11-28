@@ -16,7 +16,7 @@ internal static class ListViewMotion
 
     public static Dictionary<string, double>? Capture(ListView list)
     {
-        if (!Settings.AnimationsEnabled || list.ItemsPanelRoot is null) return null;
+        if (Services.AppPaths.DisableMotion || !Settings.AnimationsEnabled || list.ItemsPanelRoot is null) return null;
         var positions = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
         foreach (var container in list.ItemsPanelRoot.Children.OfType<ListViewItem>())
         {

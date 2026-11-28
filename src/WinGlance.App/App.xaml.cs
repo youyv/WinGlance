@@ -14,14 +14,14 @@ public partial class App : Application
         DebugSettings.BindingFailed += (_, e) => Log("binding", e.Message);
         UnhandledException += (_, e) =>
         {
-            var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinGlance");
+            var directory = AppPaths.DataDirectory;
             Directory.CreateDirectory(directory);
             File.WriteAllText(Path.Combine(directory, "app-error.log"), $"{DateTimeOffset.Now:O}\n{e.Message}\n{e.Exception}\n" + string.Join("\n", e.Exception.Data.Keys.Cast<object>().Select(key => $"{key}: {e.Exception.Data[key]}")));
         };
     }
     private static void Log(string category, string message)
     {
-        var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinGlance");
+        var directory = AppPaths.DataDirectory;
         Directory.CreateDirectory(directory);
         File.AppendAllText(Path.Combine(directory, "xaml-diagnostics.log"), $"{DateTimeOffset.Now:O} {category}: {message}\n");
     }

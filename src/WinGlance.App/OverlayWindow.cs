@@ -18,17 +18,22 @@ public sealed class OverlayWindow : Window
     private readonly Grid _root;
     private readonly Border _fallback;
     private readonly TextBlock _text;
+    private readonly Button _closeButton;
     private readonly OverlayAcrylicBackdrop _backdrop = new();
     private readonly UISettings _uiSettings = new();
     private WindowActivationState _activation = WindowActivationState.Deactivated;
     private bool _closed;
+    private bool _visible;
     private bool _preparingToExit;
+    private bool _interactionFallback;
     private XamlRoot? _xamlRoot;
     private double _scale = 1;
     private ClickThroughOverlay? _clickThrough;
     public bool IsClickThrough => _clickThrough is not null;
+    public bool IsVisible => _visible && !_closed;
     public event Action<bool>? ClickThroughChanged;
     public event Action<string>? AppearanceFailed;
+    public event Action? Hidden;
     private readonly nint _windowHandle;
     private readonly AppSettings _settings;
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _positionTimer;
@@ -53,7 +58,8 @@ public sealed class OverlayWindow : Window
             """);
         _fallback = (Border)_root.FindName("Fallback");
         _text = (TextBlock)_root.FindName("StatusText");
-        ((Button)_root.FindName("CloseButton")).Click += (_, _) => Close();
+        _closeButton = (Button)_root.FindName("CloseButton");
+        _closeButton.Click += CloseButton_Click;
         Content = _root;
         ApplyTheme(settings.Theme);
         _root.ActualThemeChanged += Root_ActualThemeChanged;
@@ -76,13 +82,20 @@ public sealed class OverlayWindow : Window
         _positionTimer = DispatcherQueue.CreateTimer();
         _positionTimer.Interval = TimeSpan.FromMilliseconds(600);
         _positionTimer.IsRepeating = false;
-        _positionTimer.Tick += (_, _) => { RecoverPosition(); SavePosition(); };
+        _positionTimer.Tick += PositionTimer_Tick;
         AppWindow.Move(new Windows.Graphics.PointInt32(settings.OverlayX ?? 80, settings.OverlayY ?? 80));
         RecoverPosition();
         AppWindow.Changed += AppWindow_Changed;
+        AppWindow.Closing += AppWindow_Closing;
         _root.Loaded += Root_Loaded;
     }
 
+    private void AppWindow_Closing(AppWindow sender, AppWindowClosingEventArgs args)
+    {
+        if (_preparingToExit || _closed) return;
+        args.Cancel = true;
+        HideOverlay();
+    }
     private void AppWindow_Changed(AppWindow sender, AppWindowChangedEventArgs args)
     {
         if (args.DidPositionChange || args.DidSizeChange) ScheduleRecovery();
@@ -98,10 +111,19 @@ public sealed class OverlayWindow : Window
     {
         if (!_closed && sender.RasterizationScale != _scale) ScheduleRecovery();
     }
-    internal void ScheduleRecovery() => DispatcherQueue.TryEnqueue(() =>
+    private void PositionTimer_Tick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
     {
-        if (!_closed && !_preparingToExit) { _positionTimer.Stop(); _positionTimer.Start(); }
-    });
+        if (!_visible || _closed || _preparingToExit) return;
+        RecoverPosition(); SavePosition();
+    }
+    internal void ScheduleRecovery()
+    {
+        if (!_visible || _closed || _preparingToExit) return;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_visible && !_closed && !_preparingToExit) { _positionTimer.Stop(); _positionTimer.Start(); }
+        });
+    }
     private void RecoverPosition()
     {
         if (_closed || _preparingToExit) return;
@@ -162,9 +184,46 @@ public sealed class OverlayWindow : Window
 
     public bool ShowOverlay(out string? error)
     {
-        bool applied = ApplyAppearance(out error);
-        if (!_closed && _clickThrough is null) Activate();
-        return applied;
+        if (_closed || _preparingToExit) { error = "悬浮条已关闭。"; return false; }
+        try
+        {
+            _visible = true;
+            bool applied = ApplyAppearance(out error);
+            RecoverPosition();
+            if (!_closed && _clickThrough is null) Activate();
+            ScheduleRecovery();
+            RecordBackdropState("shown");
+            return applied;
+        }
+        catch (Exception ex) when (ex is COMException or ObjectDisposedException or Win32Exception or InvalidOperationException)
+        {
+            _visible = false;
+            _positionTimer.Stop();
+            _clickThrough?.Hide();
+            try { AppWindow.Hide(); }
+            catch (Exception hideError) when (hideError is COMException or ObjectDisposedException) { }
+            error = "悬浮条未能显示：" + ex.Message;
+            RecordBackdropState("show-failed");
+            AppearanceFailed?.Invoke(error);
+            return false;
+        }
+    }
+    private void CloseButton_Click(object sender, RoutedEventArgs args) => HideOverlay();
+    public void HideOverlay()
+    {
+        if (!_visible || _closed || _preparingToExit) return;
+        SavePosition();
+        _visible = false;
+        _positionTimer.Stop();
+        _clickThrough?.Hide();
+        AppWindow.Hide();
+        RecordBackdropState("hidden");
+        Hidden?.Invoke();
+    }
+    internal void SetInteractionFallback(bool fallback)
+    {
+        _interactionFallback = fallback;
+        if (fallback && _clickThrough is not null) RecoverInteraction(null);
     }
     public bool ApplyAppearance(out string? error)
     {
@@ -175,13 +234,15 @@ public sealed class OverlayWindow : Window
             _settings.OverlayOpacity = EffectiveOpacity;
             _backdrop.SetOpacity(_settings.OverlayOpacity);
             _fallback.Opacity = IsHighContrast() ? 1 : _settings.OverlayOpacity;
-            if (_settings.OverlayClickThrough)
+            if (!_visible) { RecordBackdropState("hidden-appearance-changed"); return true; }
+            if (_settings.OverlayClickThrough && !_interactionFallback)
             {
                 bool newlyCreated = _clickThrough is null;
                 if (newlyCreated)
                 {
+                    if (AppPaths.InjectFault("overlay")) throw new InvalidOperationException("诊断：模拟穿透窗口创建失败");
                     var position = AppWindow.Position;
-                    _clickThrough = new ClickThroughOverlay(position.X, position.Y, ScheduleRecovery);
+                    _clickThrough = new ClickThroughOverlay(position.X, position.Y, ScheduleRecovery, HideOverlay);
                 }
                 var current = _clickThrough!.Position;
                 RenderClickThrough(current.X, current.Y);
@@ -209,7 +270,7 @@ public sealed class OverlayWindow : Window
     }
     private void RefreshClickThrough()
     {
-        if (_closed || _preparingToExit || _clickThrough is null) return;
+        if (!_visible || _closed || _preparingToExit || _clickThrough is null) return;
         try
         {
             var position = _clickThrough.Position;
@@ -233,8 +294,8 @@ public sealed class OverlayWindow : Window
             catch (Exception ex) when (ex is COMException or ObjectDisposedException or Win32Exception) { }
             _clickThrough.Dispose(); _clickThrough = null;
         }
-        _settings.OverlayClickThrough = false;
-        if (!_closed && !_preparingToExit) { RecoverPosition(); Activate(); }
+        if (error is not null) _interactionFallback = true;
+        if (_visible && !_closed && !_preparingToExit) { RecoverPosition(); Activate(); }
         if (changed) ClickThroughChanged?.Invoke(false);
         if (error is not null) AppearanceFailed?.Invoke(error);
     }
@@ -277,14 +338,14 @@ public sealed class OverlayWindow : Window
         // One overwritten snapshot; metric refreshes do not write to disk.
         try
         {
-            var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinGlance");
+            var directory = AppPaths.DataDirectory;
             Directory.CreateDirectory(directory);
             File.WriteAllText(Path.Combine(directory, "overlay-backdrop.json"), JsonSerializer.Serialize(new
             {
                 TimestampUtc = DateTimeOffset.UtcNow,
                 ProcessId = Environment.ProcessId,
                 Reason = reason,
-                Status = _closed ? "Closed" : _backdrop.Status,
+                Status = _closed ? "Closed" : !_visible ? "Hidden" : _backdrop.Status,
                 State = _backdrop.State,
                 Kind = "Thin",
                 Lifecycle = "Window.SystemBackdrop",
@@ -306,30 +367,47 @@ public sealed class OverlayWindow : Window
 
     private void Window_Closed(object sender, WindowEventArgs args)
     {
+        if (_closed) return;
         if (!_preparingToExit) SavePosition();
         _positionTimer?.Stop();
-        _closed = true;
+        if (_positionTimer is not null) _positionTimer.Tick -= PositionTimer_Tick;
+        _closed = true; _visible = false;
         _clickThrough?.Dispose(); _clickThrough = null;
         if (!_preparingToExit) RecordBackdropState("closed");
         Activated -= Window_Activated;
         Closed -= Window_Closed;
         _root.Loaded -= Root_Loaded;
         _root.ActualThemeChanged -= Root_ActualThemeChanged;
+        _closeButton.Click -= CloseButton_Click;
         try
         {
             AppWindow.Changed -= AppWindow_Changed;
-            if (_xamlRoot is not null) _xamlRoot.Changed -= XamlRoot_Changed;
+            AppWindow.Closing -= AppWindow_Closing;
         }
+        catch (Exception ex) when (ex is COMException or ObjectDisposedException) { }
+        try { if (_xamlRoot is not null) _xamlRoot.Changed -= XamlRoot_Changed; }
         catch (Exception ex) when (ex is COMException or ObjectDisposedException) { }
         _xamlRoot = null;
         _backdrop.DiagnosticChanged -= Backdrop_DiagnosticChanged;
-        // Controller release is performed by SystemBackdrop.OnTargetDisconnected.
+        // Hide/show reuses the native composition target. Only real shutdown disconnects it.
+        try { SystemBackdrop = null; }
+        catch (Exception ex) when (ex is COMException or ObjectDisposedException) { }
+        try { _backdrop.ReleaseForClose(); }
+        catch (Exception ex) when (ex is COMException or ObjectDisposedException) { }
     }
 
     public void Update(SystemSample sample)
     {
-        if (_closed) return;
+        if (!_visible || _closed || _preparingToExit) return;
         _text.Text = $"↓ {Display.Rate(sample.DownloadBytesPerSecond)}   ↑ {Display.Rate(sample.UploadBytesPerSecond)}    CPU {Display.Percent(sample.CpuPercent)}   GPU {Display.Percent(sample.GpuPercent)}";
+        RefreshClickThrough();
+    }
+
+    internal void Update(SystemSample? sample, CollectionPresentation state)
+    {
+        if (!_visible || _closed || _preparingToExit) return;
+        if (state.IsLive && sample is not null) { Update(sample); return; }
+        _text.Text = state.CompactStatus;
         RefreshClickThrough();
     }
 

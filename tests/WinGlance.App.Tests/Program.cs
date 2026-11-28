@@ -284,8 +284,9 @@ using (var client = new CollectorClient(launcher.ExistingPath, () => true, launc
 {
     var oldCallbackEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     var releaseOldCallback = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    client.SnapshotReceived += snapshot =>
+    client.SnapshotReceived += observation =>
     {
+        var snapshot = observation.Snapshot;
         if (snapshot.IntervalSeconds != 99) return;
         oldCallbackEntered.SetResult();
         releaseOldCallback.Task.GetAwaiter().GetResult();
@@ -309,9 +310,11 @@ using (var client = new CollectorClient(launcher.ExistingPath, () => true, launc
 }
 
 await CollectionRegression.Run(Check);
+await CollectorFreshnessRegression.Run(Check);
 await ExitOverlayRegression.Run(Check);
 OverlayAppearanceRegression.Run(Check);
 await ConnectionDetailsTests.Run(Check);
+EndpointCandidateRegression.Run(Check);
 Check(StartupRegistration.BuildCommand(@"C:\Some Folder\WinGlance.App.exe", true) == "\"C:\\Some Folder\\WinGlance.App.exe\" --minimized",
     "silent startup quotes the executable and keeps its argument outside the quotes");
 Check(StartupRegistration.ShouldHideOnLaunch(["--minimized"], true) &&

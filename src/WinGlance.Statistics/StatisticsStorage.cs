@@ -47,11 +47,34 @@ public sealed partial class StatisticsService
         CleanupOrphanIcons();
     }
 
-    private void Flush()
+    private void Flush(string reason, long diagnosticId = 0)
     {
         if (_connection is null) return;
+        long started = DiagnosticTrace.Start();
+        if (started != 0)
+        {
+            if (diagnosticId == 0) diagnosticId = Interlocked.Increment(ref _nextDiagnosticId);
+            DiagnosticTrace.Log.Flush("start", reason, diagnosticId, 0);
+        }
+        try
+        {
+            FlushCore(reason, diagnosticId, started);
+            if (started != 0) DiagnosticTrace.Log.Flush("finished", reason, diagnosticId,
+                System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+        }
+        catch
+        {
+            if (started != 0) DiagnosticTrace.Log.Flush("failed", reason, diagnosticId,
+                System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            throw;
+        }
+    }
+
+    private void FlushCore(string reason, long diagnosticId, long phaseStarted)
+    {
         var saved = _clock.GetUtcNow();
-        using var transaction = _connection.BeginTransaction();
+        using var transaction = _connection!.BeginTransaction();
+        FlushPhase("transaction", reason, diagnosticId, ref phaseStarted);
         using var bucketRead = Command("SELECT json FROM buckets WHERE session=$session AND day=$day AND kind=$kind AND start=$start AND entity=$entity", transaction);
         using var bucketWrite = Command("""
             INSERT INTO buckets(session,day,kind,start,finish,entity,json)
@@ -65,6 +88,7 @@ public sealed partial class StatisticsService
             var merged = MergeStored(item, transaction, bucketRead, bucketWrite);
             if (committed.Count < StoredReadCacheLimit) committed.Add(merged);
         }
+        FlushPhase("buckets", reason, diagnosticId, ref phaseStarted);
         using (var command = Command("INSERT INTO applications(id,json) VALUES($id,$json) ON CONFLICT(id) DO UPDATE SET json=excluded.json", transaction))
         {
             var idParameter = command.Parameters.Add("$id", SqliteType.Text);
@@ -88,10 +112,14 @@ public sealed partial class StatisticsService
         }
         SetMeta("lastRecorded", _lastRecorded?.UtcTicks.ToString(CultureInfo.InvariantCulture) ?? "", transaction);
         SetMeta("lastSaved", saved.UtcTicks.ToString(CultureInfo.InvariantCulture), transaction);
+        FlushPhase("metadata", reason, diagnosticId, ref phaseStarted);
         Compact(transaction, saved);
+        FlushPhase("compact", reason, diagnosticId, ref phaseStarted);
         bool cleanCatalog = _catalogNeedsCleanup || saved >= _nextCatalogCleanup;
         var removed = cleanCatalog ? PruneCatalog(transaction) : [];
+        FlushPhase("catalog", reason, diagnosticId, ref phaseStarted);
         transaction.Commit();
+        FlushPhase("commit", reason, diagnosticId, ref phaseStarted);
         _pending.Clear(); _changedApplications.Clear(); _dirtyCoverage.Clear(); _lastSaved = saved; _storageWarning = null;
         _storedReadCache.Clear(); _queryCache.Clear();
         long cutoff = saved.AddHours(-24).UtcTicks / TimeSpan.TicksPerHour * TimeSpan.TicksPerHour;
@@ -102,6 +130,16 @@ public sealed partial class StatisticsService
                 _storedReadCache[item.Key] = item;
         if (cleanCatalog) CompleteCatalogCleanup(removed, saved);
         else if (_retryIconCleanup) CleanupOrphanIcons();
+        FlushPhase("cache", reason, diagnosticId, ref phaseStarted);
+    }
+
+    private static void FlushPhase(string phase, string reason, long id, ref long started)
+    {
+        if (started == 0) return;
+        long finished = System.Diagnostics.Stopwatch.GetTimestamp();
+        DiagnosticTrace.Log.Flush(phase, reason, id,
+            System.Diagnostics.Stopwatch.GetElapsedTime(started, finished).TotalMilliseconds);
+        started = System.Diagnostics.Stopwatch.GetTimestamp();
     }
 
     private StoredBucket MergeStored(StoredBucket item, SqliteTransaction transaction, SqliteCommand? sharedRead = null, SqliteCommand? sharedWrite = null)
@@ -290,7 +328,7 @@ public sealed partial class StatisticsService
     private void Reset(StatisticsRange range)
     {
         ValidateRange(range);
-        Flush();
+        Flush("reset", _activeDiagnosticId);
         var now = _clock.GetUtcNow();
         string first = LocalDate(now).AddDays(range == StatisticsRange.LastSevenDays ? -6 : 0).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         string last = LocalDate(now).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);

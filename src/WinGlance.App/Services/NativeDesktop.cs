@@ -19,6 +19,8 @@ public sealed class TrayIcon : IDisposable
     public Action? SessionQuery { get; set; }
     public Action<bool>? SessionEnd { get; set; }
     public Action? DisplayChanged { get; set; }
+    public Action<bool>? AvailabilityChanged { get; set; }
+    public Action<bool>? PowerChanged { get; set; }
     public bool IsAvailable { get; private set; }
     private readonly uint _taskbarCreated;
     private readonly nint _ownedIcon;
@@ -32,11 +34,18 @@ public sealed class TrayIcon : IDisposable
         _data = new NotifyIconData { Size = (uint)Marshal.SizeOf<NotifyIconData>(), Window = window, Id = 1, Flags = 1 | 2 | 4, Message = 0x8001,
             Icon = _ownedIcon != 0 ? _ownedIcon : LoadIcon(0, (nint)32512), Tip = "WinGlance · 系统资源概览", Info = "", InfoTitle = "" };
         SetWindowSubclass(window, _callback, 42, 0);
-        IsAvailable = Shell_NotifyIcon(0, ref _data);
+        IsAvailable = RegisterTray();
+    }
+    private bool RegisterTray()
+    {
+        if (AppPaths.InjectFault("tray")) { Shell_NotifyIcon(2, ref _data); return false; }
+        return Shell_NotifyIcon(0, ref _data);
     }
     public void Update(string text)
     {
-        _data.Tip = text.Length > 127 ? text[..127] : text;
+        var tip = text.Length > 127 ? text[..127] : text;
+        if (_data.Tip == tip) return;
+        _data.Tip = tip;
         if (IsAvailable) Shell_NotifyIcon(1, ref _data);
     }
     private nint WndProc(nint hwnd, uint msg, nuint w, nint l, nuint id, nuint data)
@@ -44,9 +53,12 @@ public sealed class TrayIcon : IDisposable
         if (msg == 0x0011) { SessionQuery?.Invoke(); return 1; } // WM_QUERYENDSESSION: allow shutdown
         if (msg == 0x0016) { SessionEnd?.Invoke(w != 0); return 0; } // WM_ENDSESSION, including cancellation
         if (msg is 0x007E or 0x001A) DisplayChanged?.Invoke(); // display/work-area changes
+        if (msg == 0x0218 && w is 4 or 7 or 18) // WM_POWERBROADCAST: suspend / resume
+        { PowerChanged?.Invoke(w == 4); return 1; }
         if (msg == _taskbarCreated)
         {
-            IsAvailable = Shell_NotifyIcon(0, ref _data);
+            IsAvailable = RegisterTray();
+            AvailabilityChanged?.Invoke(IsAvailable);
             if (!IsAvailable) ShowRequested?.Invoke();
         }
         if (msg == 0x8001)

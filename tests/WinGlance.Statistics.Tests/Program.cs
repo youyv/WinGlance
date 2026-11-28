@@ -8,6 +8,7 @@ var root = Path.Combine(Path.GetTempPath(), "WinGlance.Statistics.Tests-" + Guid
 Directory.CreateDirectory(root);
 var tests = new List<(string Name, Func<string, Task> Run)>
 {
+    ("Diagnostic flush reasons, phases, failures and query queue timing", DiagnosticsRegression.Run),
     ("Empty database and unavailable values", async path =>
     {
         var clock = new TestClock(At(25, 12));

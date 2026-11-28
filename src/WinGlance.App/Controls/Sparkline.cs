@@ -17,6 +17,7 @@ public sealed class Sparkline : Canvas
     public Sparkline() { Children.Add(_baseline); SizeChanged += (_, _) => Draw(); }
     public void SetPoints(IEnumerable<(DateTimeOffset Timestamp, double? Value)> values, DateTimeOffset end)
     {
+        if (Services.AppPaths.DisableCharts) return;
         _end = end;
         _values = values.Where(p => p.Timestamp >= end.AddSeconds(-60) && p.Timestamp <= end).TakeLast(600).ToArray();
         Draw();

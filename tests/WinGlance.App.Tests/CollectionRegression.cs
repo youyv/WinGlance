@@ -7,19 +7,21 @@ internal static class CollectionRegression
     internal static async Task Run(Action<bool, string> check)
     {
         var snapshot = Snapshots.Create(false);
-        var connected = new CollectorConnection(false, true, false, "普通采集中", "未能授权");
+        var connected = new CollectorConnection(false, true, false, "普通采集中", "未能授权", Generation: 1,
+            Freshness: CollectionFreshness.Fresh);
+        var frame = new LiveFrame(snapshot, [], 1);
         foreach (bool paused in new[] { false, true })
         {
-            var view = CollectionPresentation.Create(connected, snapshot, paused, snapshot.Timestamp);
+            var view = CollectionPresentation.Create(connected, frame, paused);
             check(view.Notice == "未能授权" && view.CanEnhance && view.CanReconnect,
                 $"connection notice survives rendering and pause state {paused}");
-            var disconnected = CollectionPresentation.Create(connected with { Connected = false, Message = "已断开" }, snapshot, paused, snapshot.Timestamp);
+            var disconnected = CollectionPresentation.Create(connected with { Connected = false, Message = "已断开" }, frame, paused);
             check(disconnected.Live == "采集已断开" && disconnected.Status.Contains("最后观测"),
                 $"cached values stay labelled as last observed on page/tray render with pause state {paused}");
         }
-        check(CollectionPresentation.Create(connected, snapshot, false, snapshot.Timestamp.AddSeconds(10)).Live == "等待新数据",
-            "old frame cannot be labelled live even while a pipe is connected");
-        var waiting = CollectionPresentation.Create(connected with { Connecting = true, Connected = false }, snapshot, false, snapshot.Timestamp);
+        check(CollectionPresentation.Create(connected with { Freshness = CollectionFreshness.Stalled }, frame, false).Live == "等待新数据",
+            "stalled frame cannot be labelled live even while a pipe is connected");
+        var waiting = CollectionPresentation.Create(connected with { Connecting = true, Connected = false }, frame, false);
         check(!waiting.CanReconnect && !waiting.CanEnhance && waiting.Live == "等待连接", "both pages disable repeated connection actions during handover");
 
         using (var launcher = new FakeLauncher())

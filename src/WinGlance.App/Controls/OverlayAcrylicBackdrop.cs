@@ -129,10 +129,15 @@ internal sealed class OverlayAcrylicBackdrop : SystemBackdrop
         _configuration = null;
         State = "Unavailable";
         if (controller is null) return;
-        controller.StateChanged -= Controller_StateChanged;
-        try { if (target is not null) controller.RemoveSystemBackdropTarget(target); }
-        finally { controller.Dispose(); }
+        try { controller.StateChanged -= Controller_StateChanged; }
+        finally
+        {
+            try { if (target is not null) controller.RemoveSystemBackdropTarget(target); }
+            finally { controller.Dispose(); }
+        }
     }
+
+    internal void ReleaseForClose() => ReleaseController();
 
     private void Notify(string reason)
     {

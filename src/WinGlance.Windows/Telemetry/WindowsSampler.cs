@@ -35,6 +35,7 @@ public sealed partial class WindowsSampler : IDisposable
     public MonitorSnapshot Sample()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        long sampleTrace = DiagnosticTrace.Start(), sampleAllocation = DiagnosticTrace.Allocated();
         long now = Stopwatch.GetTimestamp();
         double interval = _lastTimestamp == 0 ? 0 : (now - _lastTimestamp) / (double)Stopwatch.Frequency;
         _lastTimestamp = now;
@@ -43,7 +44,11 @@ public sealed partial class WindowsSampler : IDisposable
         var drained = _traffic.Drain(resetAccounting);
         var traffic = drained.Bytes;
         var trafficCapability = drained.Capability;
+        long stageTrace = DiagnosticTrace.Start();
         var pdh = _pdh.Sample(resetAccounting);
+        DiagnosticTrace.End("collector.pdh", stageTrace);
+        stageTrace = DiagnosticTrace.Start();
+        long identityTraceTicks = 0;
         var cpuAccounting = new Dictionary<ProcessIdentity, MetricAccounting>();
         var previousIdentities = _knownIdentities;
         var newCpuTimes = new Dictionary<ProcessIdentity, (long CpuTicks, long SampleTimestamp)>();
@@ -90,12 +95,14 @@ public sealed partial class WindowsSampler : IDisposable
                 traffic.TryGetValue(processIdentity, out var bytes);
                 double? Rate(long? value) => completeTraffic ? (value ?? 0) / interval : null;
                 SoftwareIdentity software;
+                long identityStarted = DiagnosticTrace.Start();
                 try { software = _resolver.Resolve(pid, name, path, session, started); }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Win32Exception or InvalidOperationException)
                 {
                     software = new SoftwareIdentity(path ?? $"process:{name}", name, name, path, null,
                         SoftwareCategory.Unknown, "无法读取软件身份信息");
                 }
+                if (identityStarted != 0) identityTraceTicks += Stopwatch.GetTimestamp() - identityStarted;
                 RememberSoftware(processIdentity, software);
                 // Ensure a process which exited while metadata was resolving is not confused with a recycled PID.
                 try { if (process.HasExited) continue; }
@@ -117,12 +124,16 @@ public sealed partial class WindowsSampler : IDisposable
         _cpuTimes = newCpuTimes;
         _knownIdentities = processes.Select(p => p.Identity).ToHashSet();
         _traffic.SetIdentities(processes.Select(p => p.Identity));
+        DiagnosticTrace.End("collector.processesIncludingIdentity", stageTrace, count: processes.Count);
+        if (sampleTrace != 0) DiagnosticTrace.Log.Stage("collector.identity", 1000d * identityTraceTicks / Stopwatch.Frequency, 0, processes.Count);
 
         double? systemCpu = ReadSystemCpu(resetAccounting);
         var memory = new MemoryStatus { Length = (uint)Marshal.SizeOf<MemoryStatus>() };
         bool memoryReady = GlobalMemoryStatusEx(ref memory);
         var memoryAccounting = ReadMemoryAccounting(memoryReady, memory.TotalPhysical, memory.AvailablePhysical, resetAccounting);
+        stageTrace = DiagnosticTrace.Start();
         var networkAccounting = _physicalNetwork.Sample(resetAccounting);
+        DiagnosticTrace.End("collector.network", stageTrace);
         var network = SampleNetwork(networkAccounting);
         var capabilities = new Dictionary<string, Capability>
         {
@@ -142,7 +153,8 @@ public sealed partial class WindowsSampler : IDisposable
             ["systemDisk"] = new(pdh.DiskRead.HasValue ? MetricState.Ready : hasInterval ? MetricState.Unsupported : MetricState.WarmingUp,
                 "全局磁盘为 PhysicalDisk 总吞吐；进程归属依据 ETW 磁盘完成事件")
         };
-        return new MonitorSnapshot(DateTimeOffset.Now, interval,
+        stageTrace = DiagnosticTrace.Start();
+        var snapshot = new MonitorSnapshot(DateTimeOffset.Now, interval,
             new SystemSample(systemCpu, memoryReady ? (long)memory.TotalPhysical : 0,
                 memoryReady ? (long)memory.AvailablePhysical : 0, network.Download, network.Upload,
                 pdh.DiskRead, pdh.DiskWrite, pdh.GpuPercent, network.Name)
@@ -155,6 +167,9 @@ public sealed partial class WindowsSampler : IDisposable
             Accounting = BuildAccounting(processes, previousIdentities, cpuAccounting, drained, pdh,
                 memoryAccounting, memoryReady ? (long)memory.TotalPhysical : null, networkAccounting, resetAccounting)
         };
+        DiagnosticTrace.End("collector.accounting", stageTrace);
+        DiagnosticTrace.End("collector.sample", sampleTrace, sampleAllocation, processes.Count);
+        return snapshot;
     }
 
     private NetworkSample SampleNetwork(NetworkAccountingSample sampled)

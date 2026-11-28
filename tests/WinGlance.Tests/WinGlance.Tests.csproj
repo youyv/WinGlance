@@ -4,5 +4,6 @@
     <ProjectReference Include="../../src/WinGlance.Core/WinGlance.Core.csproj" />
     <Compile Include="../../src/WinGlance.Windows/Identity/*.cs" Link="Identity/%(Filename)%(Extension)" />
     <Compile Include="../../src/WinGlance.App/Services/NativeDesktop.cs" Link="NativeDesktop.cs" />
+    <Compile Include="../../src/WinGlance.App/Services/AppPaths.cs" Link="AppPaths.cs" />
   </ItemGroup>
 </Project>

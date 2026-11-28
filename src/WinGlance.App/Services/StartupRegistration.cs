@@ -42,11 +42,30 @@ public static class StartupRegistration
             return new(StartupRegistrationState.DifferentCommand, command);
         }
 
-        bool minimized = string.Equals(command, currentCommand + " --minimized", StringComparison.OrdinalIgnoreCase);
-        var state = string.Equals(command, currentCommand, StringComparison.OrdinalIgnoreCase) || minimized
+        if (!TryParseRegisteredCommand(command, out var registeredPath, out bool minimized))
+            return new(StartupRegistrationState.InvalidValue, command);
+        var state = string.Equals(BuildCommand(registeredPath, false), currentCommand, StringComparison.OrdinalIgnoreCase)
             ? StartupRegistrationState.Enabled
             : StartupRegistrationState.DifferentCommand;
         return new(state, command, minimized);
+    }
+
+    internal static bool TryParseRegisteredCommand(string command, out string executablePath, out bool minimized)
+    {
+        executablePath = ""; minimized = false;
+        var text = command.Trim();
+        if (text.Length < 3 || text[0] != '"') return false;
+        int end = text.IndexOf('"', 1);
+        if (end <= 1) return false;
+        var path = text[1..end];
+        var suffix = text[(end + 1)..];
+        if (suffix.Length > 0 && (!char.IsWhiteSpace(suffix[0]) ||
+            !suffix.Trim().Equals("--minimized", StringComparison.OrdinalIgnoreCase))) return false;
+        if (!Path.IsPathFullyQualified(path) || path.IndexOfAny(Path.GetInvalidPathChars()) >= 0 ||
+            !Path.GetFileName(path).Equals("WinGlance.App.exe", StringComparison.OrdinalIgnoreCase)) return false;
+        executablePath = path;
+        minimized = suffix.Trim().Equals("--minimized", StringComparison.OrdinalIgnoreCase);
+        return true;
     }
 
     /// <summary>Changes only the WinGlance value and returns its verified state. Errors are reported to the caller.</summary>

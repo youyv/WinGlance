@@ -16,29 +16,33 @@ namespace WinGlance.App;
 
 public sealed partial class MainWindow : Window
 {
-    private readonly CollectorClient _client = new();
+    private readonly CollectorClient _client;
     private readonly ConnectionDetailsMonitor _connections = new();
     private IReadOnlyList<ProcessConnection> _connectionRows = [];
-    private long _connectionGeneration;
+    private readonly ConnectionDetailsPresentation _connectionView = new();
     private readonly ObservableCollection<SoftwareRow> _rows = [];
     private readonly LiveSnapshotStore _live = new();
     private int _uiQueued;
     private readonly HashSet<string> _expanded = new(StringComparer.OrdinalIgnoreCase);
     private readonly AppSettings _settings = AppSettings.Load();
-    private readonly StatisticsService _statistics = new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinGlance", "statistics.db"));
+    private readonly StatisticsService _statistics = new(Path.Combine(AppPaths.DataDirectory, "statistics.db"));
     private StatisticsView? _statisticsView;
     private bool _statisticsSelected;
     private volatile bool _exitStarted;
     private readonly TrayIcon _tray;
     private readonly SessionEndCoordinator _sessionEnd;
     private MonitorSnapshot? _latest;
+    private LiveFrame? _receivedFrame;
+    private LiveFrame? _displayedFrame;
     private IReadOnlyList<SoftwareSample> _software = [];
+    private SoftwareSample? _detailSample;
+    private DateTimeOffset _detailObservedAt;
     private OverlayWindow? _overlay;
     private string? _selectedKey;
     private string _filter = "all", _sort = "cpu";
     private bool _descending = true, _paused, _ready, _exiting, _menuOpen, _hidden;
     private bool _dialogOpen;
-    private DateTimeOffset _lastStatusUpdate;
+    private bool _overlayInteractionFallback;
     private DateTimeOffset _nextReorder;
     private string? _capabilityTooltip;
     private readonly Brush _sortAccent = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 56, 183, 164));
@@ -47,6 +51,7 @@ public sealed partial class MainWindow : Window
 
     public MainWindow()
     {
+        _client = new(_live, _statistics);
         InitializeComponent();
         Title = "WinGlance";
         var work = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
@@ -79,6 +84,8 @@ public sealed partial class MainWindow : Window
             ExitRequested = ExitApp,
             SessionQuery = _sessionEnd.Query,
             DisplayChanged = () => _overlay?.ScheduleRecovery(),
+            AvailabilityChanged = TrayAvailabilityChanged,
+            PowerChanged = suspended => { if (suspended) _client.OnSuspending(); else _client.OnResumed(); },
             SessionEnd = confirmed => { if (confirmed) _exiting = true; _sessionEnd.End(confirmed, TimeSpan.FromSeconds(2)); }
         };
         AppWindow.Closing += (_, e) =>
@@ -87,40 +94,32 @@ public sealed partial class MainWindow : Window
             e.Cancel = true;
             if (!_exiting && _settings.CloseToTray && _tray.IsAvailable)
             {
-                _hidden = true; _connections.Deactivate(); _statisticsView?.SetActive(false); AppWindow.Hide();
+                _hidden = true; ClearConnectionDetails(); _statisticsView?.SetActive(false); AppWindow.Hide();
             }
             else ExitApp();
         };
         AppWindow.Changed += (_, args) =>
         {
             if (!_hidden && AppWindow.Presenter is OverlappedPresenter p && p.State == OverlappedPresenterState.Minimized && _tray.IsAvailable)
-            { _hidden = true; _connections.Deactivate(); _statisticsView?.SetActive(false); AppWindow.Hide(); }
+            { _hidden = true; ClearConnectionDetails(); _statisticsView?.SetActive(false); AppWindow.Hide(); }
         };
         Closed += (_, _) => { _connections.Dispose(); _client.Dispose(); _tray.Dispose(); _overlay?.Close(); _statisticsView?.SetActive(false); };
         _connections.Updated += update => DispatcherQueue.TryEnqueue(() =>
         {
             if (_exitStarted || _hidden || _paused || _statisticsSelected || !_connections.IsCurrent(update)) return;
-            ConnectionHint.Text = update.Result.Description;
-            if (!_connectionRows.SequenceEqual(update.Result.Connections))
-            {
-                _connectionRows = update.Result.Connections;
-                ConnectionsList.ItemsSource = _connectionRows;
-            }
-            ConnectionEmpty.Visibility = _connectionRows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            ConnectionEmpty.Text = update.Result.UnverifiedProcesses > 0 || update.Result.UnavailableTables.Count > 0 ? "部分连接无法读取，详见上方提示" : "当前没有 TCP 连接或 UDP 绑定";
+            UpdateConnectionDetails();
+            if (_connectionView.Apply(update)) RenderConnectionDetails();
         });
-        _client.SnapshotReceived += snapshot =>
+        _client.SnapshotReceived += _ =>
         {
-            // Accept immutable source increments before dispatching UI work. Pausing or hiding
-            // either page must never stop accounting.
+            // The client has already committed accounting and the matching live frame.
+            // Pausing or hiding either page only changes presentation.
             if (_exitStarted) return;
-            _statistics.Accept(snapshot);
-            // The reader maintains all 60-second histories even while UI frames are coalesced or hidden.
-            _live.Accept(snapshot);
             if (Interlocked.Exchange(ref _uiQueued, 1) == 0 && !DispatcherQueue.TryEnqueue(() =>
                 {
                     Interlocked.Exchange(ref _uiQueued, 0);
-                    if (!_exitStarted && _live.Latest is { } frame) Receive(frame);
+                    var read = _client.ReadState();
+                    if (!_exitStarted && read.Frame is { } frame && frame.Generation == read.Connection.Generation) Receive(frame);
                 })) Interlocked.Exchange(ref _uiQueued, 0);
         };
         _client.ConnectionChanged += () => DispatcherQueue.TryEnqueue(UpdateCollectionState);
@@ -128,31 +127,36 @@ public sealed partial class MainWindow : Window
         UpdateSortHeaders();
         ToolTipService.SetToolTip(NetworkValue, "选定网卡统计；与应用流量合计可能不同。");
         _ = _client.StartAsync();
-        if (_settings.ShowOverlay) ToggleOverlay();
     }
 
     private void Receive(LiveFrame frame)
     {
+        _receivedFrame = frame;
         var snapshot = frame.Snapshot;
-        if (_latest is { } previous && snapshot.Timestamp < previous.Timestamp) { _nextReorder = default; _lastStatusUpdate = default; }
+        if (_latest is { } previous && snapshot.Timestamp < previous.Timestamp) _nextReorder = default;
         _latest = snapshot;
-        _software = frame.Software;
-        _overlay?.Update(OverviewSelection.Apply(snapshot.System, _settings.NetworkInterfaceId, _settings.PhysicalDiskId));
-        if (snapshot.Timestamp - _lastStatusUpdate > TimeSpan.FromSeconds(3))
-        {
-            _lastStatusUpdate = snapshot.Timestamp;
-            _tray.Update($"WinGlance\nCPU {Display.Percent(snapshot.System.CpuPercent)} · GPU {Display.Percent(snapshot.System.GpuPercent)}\n↓ {Display.Rate(snapshot.System.DownloadBytesPerSecond)} ↑ {Display.Rate(snapshot.System.UploadBytesPerSecond)}");
-        }
-        if (_hidden) return;
+        if (_hidden) { UpdateCollectionState(); return; }
         if (_paused) { UpdateCollectionState(); return; }
         Render();
     }
 
     private void Render()
     {
+        long started = DiagnosticTrace.Start(), allocated = DiagnosticTrace.Allocated();
+        try { RenderCore(); }
+        finally { DiagnosticTrace.End("app.render", started, allocated, _rows.Count); }
+    }
+
+    private void RenderCore()
+    {
+        if (_statisticsSelected || _hidden || _exitStarted) { UpdateCollectionState(); return; }
+        if (!_paused && _receivedFrame is { } received)
+        {
+            _displayedFrame = received;
+            _software = received.Software;
+        }
         UpdateCollectionState();
-        if (_statisticsSelected || _hidden || _exitStarted) return;
-        if (_latest is not { } snapshot) return;
+        if (_displayedFrame?.Snapshot is not { } snapshot) return;
         var system = OverviewSelection.Apply(snapshot.System, _settings.NetworkInterfaceId, _settings.PhysicalDiskId);
         CpuValue.Text = Display.Percent(system.CpuPercent);
         GpuValue.Text = Display.Percent(system.GpuPercent);
@@ -245,20 +249,36 @@ public sealed partial class MainWindow : Window
         _expanded.RemoveWhere(key => !active.Contains(key));
         CountLabel.Text = $"{items.Length} 个应用" + (HideSystemToggle.IsOn ? $" · 已隐藏 {hidden} 项" : "");
         EmptyState.Visibility = _rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        EmptyLabel.Text = _latest is null ? "等待第一份采集数据…" : "没有匹配的应用";
-        if (_filter == "network" && _latest?.Capabilities.GetValueOrDefault("network") is { State: not MetricState.Ready } network)
+        var displayed = _displayedFrame?.Snapshot;
+        EmptyLabel.Text = displayed is null ? "等待第一份采集数据…" : "没有匹配的应用";
+        if (_filter == "network" && displayed?.Capabilities.GetValueOrDefault("network") is { State: not MetricState.Ready } network)
             EmptyLabel.Text = network.State == MetricState.PermissionRequired ? "启用增强采集后，可以筛选正在联网的应用。" : network.Message;
-        if (_filter == "gpu" && _latest?.Capabilities.GetValueOrDefault("gpu") is { State: not MetricState.Ready } gpu)
+        if (_filter == "gpu" && displayed?.Capabilities.GetValueOrDefault("gpu") is { State: not MetricState.Ready } gpu)
             EmptyLabel.Text = gpu.Message;
     }
 
     private void UpdateDetail()
     {
         if (_selectedKey is null || DetailPanel.Visibility != Visibility.Visible) return;
-        var item = _software.FirstOrDefault(s => s.Key == _selectedKey);
-        if (item is null) { DetailSubtitle.Text = "应用已退出"; UpdateConnectionDetails(); return; }
+        var displayed = _software.FirstOrDefault(s => s.Key == _selectedKey);
+        if (displayed is not null)
+        {
+            _detailSample = displayed;
+            _detailObservedAt = _displayedFrame?.Snapshot.Timestamp ?? DateTimeOffset.Now;
+        }
+        var item = displayed ?? (_detailSample?.Key == _selectedKey ? _detailSample : null);
+        if (item is null)
+        {
+            DetailName.Text = "应用数据不可用"; DetailSubtitle.Text = "请重新选择应用"; DetailIcon.Source = null;
+            DetailCpu.Text = DetailGpu.Text = DetailVram.Text = DetailNetwork.Text = "—";
+            DetailPath.Text = DetailClassification.Text = DetailProcesses.Text = "";
+            DetailCpuChart.SetPoints([], DateTimeOffset.Now); DetailGpuChart.SetPoints([], DateTimeOffset.Now);
+            DetailDownloadChart.SetPoints([], DateTimeOffset.Now); DetailUploadChart.SetPoints([], DateTimeOffset.Now);
+            UpdateConnectionDetails(); return;
+        }
         DetailName.Text = item.Software.DisplayName;
-        DetailSubtitle.Text = $"{item.Processes.Count} 个进程 · {item.Software.Publisher ?? SoftwareRow.CategoryName(item.Software.Category)}";
+        DetailSubtitle.Text = displayed is null ? $"应用已退出 · 上次显示 {_detailObservedAt.ToLocalTime():HH:mm:ss}" :
+            $"{item.Processes.Count} 个进程 · {item.Software.Publisher ?? SoftwareRow.CategoryName(item.Software.Category)}";
         DetailIcon.Source = _rows.FirstOrDefault(r => r.Key == item.Key)?.Icon;
         DetailCpu.Text = Display.Percent(item.CpuPercent); DetailGpu.Text = Display.Percent(item.GpuPercent);
         DetailVram.Text = $"专用 {Display.Bytes(item.DedicatedGpuBytes)}  ·  共享 {Display.Bytes(item.SharedGpuBytes)}";
@@ -266,8 +286,8 @@ public sealed partial class MainWindow : Window
         DetailPath.Text = item.Software.FilePath ?? "路径不可访问";
         DetailClassification.Text = $"{SoftwareRow.CategoryName(item.Software.Category)} · {item.Software.ClassificationReason}";
         DetailProcesses.Text = string.Join("\n", item.Processes.Select(p => $"{p.Software.ProcessName} · PID {p.Identity.Pid}"));
+        var end = _detailObservedAt;
         var history = _live.History.Get(item.Key);
-        var end = _latest?.Timestamp ?? DateTimeOffset.Now;
         DetailCpuChart.SetPoints(history.Select(p => (p.Timestamp, p.CpuPercent)), end);
         DetailGpuChart.SetPoints(history.Select(p => (p.Timestamp, p.GpuPercent)), end);
         DetailDownloadChart.SetPoints(history.Select(p => (p.Timestamp, p.DownloadBytesPerSecond)), end);
@@ -277,31 +297,39 @@ public sealed partial class MainWindow : Window
 
     private void UpdateConnectionDetails()
     {
-        if (_hidden || _paused || _statisticsSelected || _exitStarted || DetailPanel.Visibility != Visibility.Visible || !_client.Connection.Connected)
-        {
-            _connections.Deactivate();
-            ConnectionHint.Text = "连接详情已暂停";
-            return;
-        }
-        var selected = _software.FirstOrDefault(s => s.Key == _selectedKey);
-        if (selected is null)
-        {
-            _connections.Deactivate(); _connectionRows = []; ConnectionsList.ItemsSource = _connectionRows;
-            ConnectionHint.Text = "应用已退出"; ConnectionEmpty.Text = "当前没有可查询的进程"; ConnectionEmpty.Visibility = Visibility.Visible;
-            return;
-        }
-        long generation = _connections.Activate(selected.Key, selected.Processes.Select(p => p.Identity));
-        if (generation != _connectionGeneration)
-        {
-            _connectionGeneration = generation; _connectionRows = []; ConnectionsList.ItemsSource = _connectionRows;
-            ConnectionHint.Text = "正在查询连接…"; ConnectionEmpty.Visibility = Visibility.Collapsed;
-        }
+        var read = _client.ReadState();
+        // Identity membership stays current even while the displayed values are frozen.
+        var selected = read.Frame?.Software.FirstOrDefault(s => s.Key == _selectedKey);
+        var state = CollectionPresentation.Create(read.Connection, _displayedFrame, _paused);
+        string? unavailable = !state.IsLive ? state.CompactStatus : _paused ? "连接详情已暂停" : null;
+        _connectionView.Select(_selectedKey, selected?.Processes.Select(p => p.Identity),
+            !_hidden && !_statisticsSelected && !_exitStarted && DetailPanel.Visibility == Visibility.Visible, unavailable);
+        if (_connectionView.CanQuery && selected is not null)
+            _connectionView.BindQuery(_connections.Activate(selected.Key, selected.Processes.Select(p => p.Identity)));
+        else _connections.Deactivate();
+        RenderConnectionDetails();
+    }
+
+    private void ClearConnectionDetails()
+    {
+        _connections.Deactivate(); _connectionView.Clear(); RenderConnectionDetails();
+    }
+
+    private void RenderConnectionDetails()
+    {
+        if (!_connectionRows.SequenceEqual(_connectionView.Rows))
+        { _connectionRows = _connectionView.Rows; ConnectionsList.ItemsSource = _connectionRows; }
+        ConnectionHint.Text = _connectionView.Hint;
+        ConnectionEmpty.Text = _connectionView.EmptyMessage;
+        ConnectionEmpty.Visibility = _connectionRows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void Process_ItemClick(object sender, ItemClickEventArgs e)
     {
         if (e.ClickedItem is not SoftwareRow row) return;
-        _selectedKey = row.Sample.Key; DetailPanel.Visibility = Visibility.Visible; UpdateDetail();
+        _selectedKey = row.Sample.Key; _detailSample = row.Sample;
+        _detailObservedAt = _displayedFrame?.Snapshot.Timestamp ?? DateTimeOffset.Now;
+        DetailPanel.Visibility = Visibility.Visible; UpdateDetail();
     }
     private void Expand_Click(object sender, RoutedEventArgs e)
     {
@@ -346,8 +374,8 @@ public sealed partial class MainWindow : Window
     private void Elevate_Click(object sender, RoutedEventArgs e) { _ = _client.StartAsync(true); }
     private void Reconnect_Click(object sender, RoutedEventArgs e) { _ = _client.StartAsync(false, forceReconnect: true); }
     private void CollectionNotice_CloseButtonClick(InfoBar sender, object args) => _client.DismissNotice();
-    private void CloseDetail_Click(object sender, RoutedEventArgs e) { _connections.Deactivate(); DetailPanel.Visibility = Visibility.Collapsed; _selectedKey = null; }
-    private void OpenLocation_Click(object sender, RoutedEventArgs e) => RunAction(() => ProcessActions.OpenLocation(_software.FirstOrDefault(s => s.Key == _selectedKey)?.Software.FilePath));
+    private void CloseDetail_Click(object sender, RoutedEventArgs e) { ClearConnectionDetails(); DetailPanel.Visibility = Visibility.Collapsed; _selectedKey = null; }
+    private void OpenLocation_Click(object sender, RoutedEventArgs e) => RunAction(() => ProcessActions.OpenLocation(_detailSample is { } detail && detail.Key == _selectedKey ? detail.Software.FilePath : null));
     private void Overlay_Click(object sender, RoutedEventArgs e) => ToggleOverlay();
 
     private void Row_RightTapped(object sender, RightTappedRoutedEventArgs e)
@@ -412,33 +440,45 @@ public sealed partial class MainWindow : Window
             AppWindow.Hide();
         }
         else { Activate(); UpdateTitleBar(); }
+        if (_settings.ShowOverlay) ToggleOverlay();
     }
     private void ShowMain() { _hidden = false; AppWindow.Show(); if (AppWindow.Presenter is OverlappedPresenter p) p.Restore(); Activate(); UpdateTitleBar(); _statisticsView?.SetActive(_statisticsSelected); Render(); }
     private void ToggleOverlay()
     {
-        if (_overlay is not null) { _overlay.Close(); return; }
-        if (!_tray.IsAvailable) _settings.OverlayClickThrough = false;
-        try { _overlay = new OverlayWindow(_settings); }
-        catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        if (_overlay?.IsVisible == true) { _overlay.HideOverlay(); return; }
+        if (!_tray.IsAvailable) _overlayInteractionFallback = true;
+        if (_overlay is null)
         {
-            _settings.ShowOverlay = false; _settings.Save();
-            ShowOverlayFailure("悬浮条未能打开：" + ex.Message);
-            return;
+            try { _overlay = new OverlayWindow(_settings); }
+            catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                _settings.ShowOverlay = false; _settings.Save();
+                ShowOverlayFailure("悬浮条未能打开：" + ex.Message);
+                return;
+            }
+            _overlay.ClickThroughChanged += enabled => { _tray.CanRestoreOverlayInteraction = enabled && _overlay?.IsVisible == true; };
+            _overlay.AppearanceFailed += message =>
+            {
+                if (_exitStarted) return;
+                _overlayInteractionFallback = true;
+                _settings.Save(); ShowOverlayFailure(message);
+            };
+            _overlay.Hidden += () =>
+            {
+                _tray.CanRestoreOverlayInteraction = false;
+                if (!_exitStarted && !_exiting) { _settings.ShowOverlay = false; _settings.Save(); }
+            };
+            _overlay.Closed += (_, _) =>
+            {
+                _overlay = null;
+                _tray.CanRestoreOverlayInteraction = false;
+                if (!_exitStarted && !_exiting) { _settings.ShowOverlay = false; _settings.Save(); }
+            };
         }
-        _overlay.ClickThroughChanged += enabled => { _tray.CanRestoreOverlayInteraction = enabled; if (!_exitStarted) _settings.Save(); };
-        _overlay.AppearanceFailed += message =>
-        {
-            if (_exitStarted) return;
-            _settings.Save(); ShowOverlayFailure(message);
-        };
-        _overlay.Closed += (_, _) =>
-        {
-            _overlay = null;
-            _tray.CanRestoreOverlayInteraction = false;
-            if (!_exitStarted && !_exiting) { _settings.ShowOverlay = false; _settings.Save(); }
-        };
-        _overlay.ShowOverlay(out _); if (_latest is not null) _overlay.Update(OverviewSelection.Apply(_latest.System, _settings.NetworkInterfaceId, _settings.PhysicalDiskId));
-        _settings.ShowOverlay = true; _settings.Save();
+        _overlay.SetInteractionFallback(_overlayInteractionFallback || !_tray.IsAvailable);
+        _overlay.ShowOverlay(out _); UpdateCollectionState();
+        _tray.CanRestoreOverlayInteraction = _overlay.IsVisible && _overlay.IsClickThrough;
+        _settings.ShowOverlay = _overlay.IsVisible; _settings.Save();
     }
     private void ShowOverlayFailure(string message)
     {
@@ -452,6 +492,14 @@ public sealed partial class MainWindow : Window
         _tray.CanRestoreOverlayInteraction = false;
         _settings.Save();
     }
+    private void TrayAvailabilityChanged(bool available)
+    {
+        if (available || _exitStarted) return;
+        _overlayInteractionFallback = true;
+        _overlay?.SetInteractionFallback(true);
+        _tray.CanRestoreOverlayInteraction = false;
+        ShowOverlayFailure("系统托盘暂不可用，悬浮条已恢复交互；已保存的穿透偏好仍保留。");
+    }
     private async void ExitApp()
     {
         if (_exitStarted) return;
@@ -462,7 +510,7 @@ public sealed partial class MainWindow : Window
     }
     private static void LogSaveError(string message)
     {
-        try { File.AppendAllText(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinGlance", "statistics-error.log"), $"{DateTimeOffset.Now:O} exit: {message}\n"); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        try { File.AppendAllText(Path.Combine(AppPaths.DataDirectory, "statistics-error.log"), $"{DateTimeOffset.Now:O} exit: {message}\n"); } catch (IOException) { } catch (UnauthorizedAccessException) { }
     }
 
     private async Task FinishPersistenceAsync()
@@ -494,7 +542,7 @@ public sealed partial class MainWindow : Window
             UpdateCollectionState();
         }
         _statisticsSelected = statistics;
-        _connections.Deactivate();
+        ClearConnectionDetails();
         DetailPanel.Visibility = Visibility.Collapsed; _selectedKey = null;
         OverviewContent.Visibility = statistics ? Visibility.Collapsed : Visibility.Visible;
         StatisticsHost.Visibility = statistics ? Visibility.Visible : Visibility.Collapsed;
@@ -540,9 +588,10 @@ public sealed partial class MainWindow : Window
     private void UpdateCollectionState()
     {
         if (_exitStarted) return;
-        var state = _client.Connection;
-        if (!state.Connected) { _connections.Deactivate(); ConnectionHint.Text = "连接详情已暂停"; }
-        var presentation = CollectionPresentation.Create(state, _latest, _paused, DateTimeOffset.UtcNow);
+        var read = _client.ReadState();
+        var state = read.Connection;
+        var presentation = CollectionPresentation.Create(state, _displayedFrame, _paused);
+        var collection = CollectionPresentation.Create(state, read.Frame, false);
         EnhancedButton.Content = presentation.Label;
         EnhancedButton.IsEnabled = presentation.CanEnhance;
         ReconnectButton.IsEnabled = presentation.CanReconnect;
@@ -552,7 +601,14 @@ public sealed partial class MainWindow : Window
         if (_latest is null) EmptyLabel.Text = state.Message;
         CollectionNotice.Message = presentation.Notice ?? "";
         CollectionNotice.IsOpen = presentation.Notice is not null;
-        _statisticsView?.SetCollectionState(presentation);
+        _statisticsView?.SetCollectionState(collection);
+        var sample = read.Frame is { } frame ? OverviewSelection.Apply(frame.Snapshot.System, _settings.NetworkInterfaceId, _settings.PhysicalDiskId) : null;
+        _overlay?.Update(sample, collection);
+        string tray = collection.IsLive && sample is not null
+            ? $"WinGlance\nCPU {Display.Percent(sample.CpuPercent)} · GPU {Display.Percent(sample.GpuPercent)}\n↓ {Display.Rate(sample.DownloadBytesPerSecond)} ↑ {Display.Rate(sample.UploadBytesPerSecond)}"
+            : "WinGlance · " + collection.CompactStatus;
+        _tray.Update(tray);
+        UpdateConnectionDetails();
     }
     private void NetworkDevice_Click(object sender, RoutedEventArgs e) => ShowDeviceMenu((Button)sender, true);
     private void DiskDevice_Click(object sender, RoutedEventArgs e) => ShowDeviceMenu((Button)sender, false);
@@ -567,7 +623,7 @@ public sealed partial class MainWindow : Window
             {
                 if (network) _settings.NetworkInterfaceId = id; else _settings.PhysicalDiskId = id;
                 _settings.Save(); Render();
-                if (_latest is not null) _overlay?.Update(OverviewSelection.Apply(_latest.System, _settings.NetworkInterfaceId, _settings.PhysicalDiskId));
+                UpdateCollectionState();
             };
             menu.Items.Add(item);
         }
@@ -645,7 +701,9 @@ public sealed partial class MainWindow : Window
             var tray = new ToggleSwitch { Header = "关闭主窗口时", OnContent = "保留在托盘继续监控", OffContent = "退出应用", IsOn = _settings.CloseToTray };
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(tray, "CloseToTrayToggle");
             var panel = new StackPanel { Spacing = 20, MaxWidth = 460, HorizontalAlignment = HorizontalAlignment.Left }; panel.Children.Add(theme); panel.Children.Add(startupPanel); panel.Children.Add(tray);
-            var clickThrough = new ToggleSwitch { Header = "悬浮条鼠标穿透", OnContent = "点击穿过悬浮条", OffContent = "允许拖动与关闭", IsOn = _settings.OverlayClickThrough, IsEnabled = _tray.IsAvailable };
+            var clickThrough = new ToggleSwitch { Header = "悬浮条鼠标穿透", OnContent = "点击穿过悬浮条", OffContent = "允许拖动与关闭", IsOn = _settings.OverlayClickThrough, IsEnabled = _tray.IsAvailable || _settings.OverlayClickThrough };
+            bool interactionEdited = false;
+            clickThrough.Toggled += (_, _) => interactionEdited = true;
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(clickThrough, "OverlayClickThroughToggle");
             var opacity = new Slider { Header = "悬浮条背景不透明度", Minimum = 20, Maximum = 100, StepFrequency = 5, Value = Math.Clamp(_settings.OverlayOpacity * 100, 20, 100), TickFrequency = 20 };
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(opacity, "OverlayOpacitySlider");
@@ -671,7 +729,7 @@ public sealed partial class MainWindow : Window
                 var previousOpacity = _settings.OverlayOpacity;
                 _settings.Theme = theme.SelectedIndex switch { 1 => "Light", 2 => "Dark", _ => "System" };
                 _settings.CloseToTray = tray.IsOn;
-                _settings.OverlayClickThrough = clickThrough.IsEnabled && clickThrough.IsOn;
+                _settings.OverlayClickThrough = clickThrough.IsOn;
                 _settings.OverlayOpacity = opacity.Value / 100;
                 if (!_settings.TrySave(out var error))
                 {
@@ -686,6 +744,8 @@ public sealed partial class MainWindow : Window
                     startupNotice.IsOpen = true;
                     return;
                 }
+                if (interactionEdited && _tray.IsAvailable) _overlayInteractionFallback = false;
+                _overlay?.SetInteractionFallback(_overlayInteractionFallback || !_tray.IsAvailable);
                 if (_overlay is not null && !_overlay.ApplyAppearance(out var appearanceError))
                 {
                     args.Cancel = true; clickThrough.IsOn = _settings.OverlayClickThrough;

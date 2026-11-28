@@ -1,11 +1,11 @@
-param([ValidateSet('Debug','Release')][string]$Configuration = 'Release', [switch]$SkipTests)
+param([ValidateSet('Debug','Release')][string]$Configuration = 'Release', [switch]$SkipTests, [string]$OutputDirectory = 'artifacts\app')
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $dotnetPath = Join-Path $projectRoot '.tools\dotnet\dotnet.exe'
 if (-not (Test-Path -LiteralPath $dotnetPath)) { throw 'Run scripts/setup.ps1 first.' }
 $env:DOTNET_ROOT = Split-Path -Parent $dotnetPath
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
-$outputPath = Join-Path $projectRoot 'artifacts\app'
+$outputPath = if ([IO.Path]::IsPathRooted($OutputDirectory)) { $OutputDirectory } else { Join-Path $projectRoot $OutputDirectory }
 Push-Location $projectRoot
 try {
     if (-not $SkipTests) {

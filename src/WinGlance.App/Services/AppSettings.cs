@@ -4,7 +4,7 @@ namespace WinGlance.App.Services;
 
 public sealed class AppSettings
 {
-    private static readonly string FilePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinGlance", "settings.json");
+    private static readonly string FilePath = Path.Combine(AppPaths.DataDirectory, "settings.json");
     private static readonly object SaveLock = new();
     public string Theme { get; set; } = "System";
     public bool HideSystem { get; set; } = true;

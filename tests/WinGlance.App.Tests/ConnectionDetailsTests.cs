@@ -9,6 +9,7 @@ internal static class ConnectionDetailsTests
 {
     internal static async Task Run(Action<bool, string> check)
     {
+        Presentation(check);
         check(IpHelperConnections.Port(0x5000) == 80 && IpHelperConnections.Port(0xbb01) == 443,
             "IP Helper DWORD ports decode their network-order low 16 bits");
         check(IpHelperConnections.Scope(0x03000000) == 3,
@@ -80,6 +81,40 @@ internal static class ConnectionDetailsTests
         }
 
         if (OperatingSystem.IsWindows()) await NativeLoopback(check);
+    }
+
+    private static void Presentation(Action<bool, string> check)
+    {
+        var first = new ProcessIdentity(10, 100);
+        var second = new ProcessIdentity(20, 200);
+        var observed = DateTimeOffset.Now;
+        var state = new ConnectionDetailsPresentation();
+        state.Select("A", [first, second], true, null); state.BindQuery(1);
+        var rows = new ProcessConnection[] { new("TCP4", first, "127.0.0.1:80", null, "监听"), new("UDP4", second, "127.0.0.1:90", null, "本地绑定") };
+        var update = new ConnectionDetailsSnapshot(1, "A", new(observed, rows, 0, [], false, 2));
+        check(state.Apply(update) && state.Rows.Count == 2, "details accept the selected owner's current query");
+        var previousRows = state.Rows;
+        state.Select("A", [second, first], true, null); state.BindQuery(1); state.Apply(update);
+        check(ReferenceEquals(previousRows, state.Rows), "same membership and equal rows preserve the list binding");
+        state.Select("A", [first, second], true, "连接详情已暂停");
+        check(state.Rows.Count == 2 && state.Hint.Contains("上次观测") && !state.Apply(update), "pause retains labelled history but rejects queued updates");
+        state.Select("B", [second], true, "采集已断开");
+        check(state.OwnerKey == "B" && state.Rows.Count == 0 && state.ObservedAt is null && !state.Apply(update), "paused or disconnected selection cannot retain another application's rows or timestamp");
+        state.Select("A", [first, second], true, null); state.BindQuery(2);
+        state.Apply(update with { Generation = 2 });
+        state.Select("A", [second], true, null); state.BindQuery(3);
+        check(state.Rows.Count == 1 && state.Rows[0].Process == second && state.Hint.Contains("更新中") &&
+            !state.Apply(update with { Generation = 2 }), "membership change retains only surviving identities and rejects the old query");
+        state.Select("A", [second with { StartTimeUtcTicks = 201 }], true, null);
+        check(state.Rows.Count == 0, "PID reuse does not keep old process endpoints");
+        state.Select("A", [first], false, null);
+        check(state.OwnerKey is null && state.Rows.Count == 0 && state.ObservedAt is null, "closing or hiding details clears their owner");
+        check(StartupRegistration.TryParseRegisteredCommand("  \"C:\\Old Folder\\WinGlance.App.exe\" --minimized  ", out var path, out var minimized) &&
+            path == @"C:\Old Folder\WinGlance.App.exe" && minimized, "moved executable command retains its silent startup preference");
+        check(StartupRegistration.TryParseRegisteredCommand("\"D:\\New\\WinGlance.App.exe\"", out _, out minimized) && !minimized,
+            "ordinary startup remains distinguishable from silent startup");
+        check(new[] { "WinGlance.App.exe --minimized", "\"relative\\WinGlance.App.exe\"", "\"C:\\x.exe\" --minimized", "\"C:\\WinGlance.App.exe\" --minimized extra", "\"C:\\WinGlance.App.exe\"--minimized" }
+            .All(command => !StartupRegistration.TryParseRegisteredCommand(command, out _, out _)), "startup parser rejects unknown programs, arguments and malformed quoting");
     }
 
     private static async Task NativeLoopback(Action<bool, string> check)

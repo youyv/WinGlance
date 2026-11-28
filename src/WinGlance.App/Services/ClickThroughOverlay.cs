@@ -16,6 +16,7 @@ internal sealed class ClickThroughOverlay : IDisposable
     private static readonly Dictionary<nint, ClickThroughOverlay> Windows = [];
     private static bool _registered;
     private readonly Action _displayChanged;
+    private readonly Action _closeRequested;
     private nint _dc, _bitmap, _oldBitmap, _font, _oldFont, _bits;
     private byte[] _pixels = [];
     private int _width, _height;
@@ -24,10 +25,17 @@ internal sealed class ClickThroughOverlay : IDisposable
     private bool _shown;
     internal nint Handle { get; private set; }
     internal void Invalidate() => _lastPaint = null;
+    internal void Hide()
+    {
+        if (Handle == 0) return;
+        ShowWindow(Handle, 0);
+        _shown = false;
+    }
 
-    internal ClickThroughOverlay(int x, int y, Action displayChanged)
+    internal ClickThroughOverlay(int x, int y, Action displayChanged, Action closeRequested)
     {
         _displayChanged = displayChanged;
+        _closeRequested = closeRequested;
         if (!_registered)
         {
             var windowClass = new WindowClass
@@ -147,6 +155,11 @@ internal sealed class ClickThroughOverlay : IDisposable
     private static uint FromColorRef(uint color) => ((color & 255) << 16) | (color & 0xFF00) | ((color >> 16) & 255);
     private static nint WndProc(nint window, uint message, nuint wParam, nint lParam)
     {
+        if (message == 0x0010 && Windows.TryGetValue(window, out var closingOverlay))
+        {
+            closingOverlay._closeRequested();
+            return 0;
+        }
         if ((message is 0x02E0 or 0x007E or 0x001A) && Windows.TryGetValue(window, out var overlay))
             overlay._displayChanged();
         if (message == 0x0021) return 3; // MA_NOACTIVATE, including accessibility-triggered hit tests.
@@ -192,6 +205,7 @@ internal sealed class ClickThroughOverlay : IDisposable
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern nint CreateWindowEx(uint extendedStyle, string className, string title, uint style, int x, int y, int width, int height, nint parent, nint menu, nint instance, nint data);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern nint DefWindowProc(nint window, uint message, nuint wParam, nint lParam);
     [DllImport("user32.dll")] private static extern bool DestroyWindow(nint window);
+    [DllImport("user32.dll")] private static extern bool ShowWindow(nint window, int command);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern nint GetModuleHandle(string? module);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool GetWindowRect(nint window, out Rect rectangle);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool SetWindowPos(nint window, nint after, int x, int y, int width, int height, uint flags);
