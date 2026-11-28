@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.ComponentModel;
+using System.Globalization;
 using System.Text.Json;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
@@ -27,9 +28,12 @@ public sealed class OverlayWindow : Window
     private bool _hasBeenShown;
     private bool _preparingToExit;
     private bool _interactionFallback;
+    private bool _textScaleSubscribed;
     private XamlRoot? _xamlRoot;
     private double _scale = 1;
+    private double _textScale = 1;
     private double _availableWidthDip = 510;
+    private double _availableHeightDip = double.PositiveInfinity;
     private SystemSample? _sample;
     private bool _isLive;
     private string _compactStatus = "等待数据";
@@ -56,9 +60,14 @@ public sealed class OverlayWindow : Window
                 <Grid Padding="16,10,12,10">
                     <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                     <TextBlock x:Name="StatusText" Text="WinGlance · 等待采样" Foreground="{ThemeResource TextFillColorPrimaryBrush}"
-                               FontFamily="Consolas" FontSize="12" LineHeight="20" LineStackingStrategy="BlockLineHeight" VerticalAlignment="Center"/>
-                    <Button x:Name="CloseButton" Grid.Column="1" Content="×" Padding="6,0,6,0" Margin="12,0,0,0"
-                            ToolTipService.ToolTip="关闭悬浮条" AutomationProperties.Name="关闭悬浮条"/>
+                               FontFamily="Consolas" FontSize="12" LineHeight="20" IsTextScaleFactorEnabled="False"
+                               LineStackingStrategy="BlockLineHeight" VerticalAlignment="Center"/>
+                    <Button x:Name="CloseButton" Grid.Column="1" Padding="0" Margin="12,0,0,0"
+                            Width="36" MinWidth="36" Height="32" MinHeight="32" VerticalAlignment="Center"
+                            IsTextScaleFactorEnabled="False" FontSize="16"
+                            ToolTipService.ToolTip="关闭悬浮条" AutomationProperties.Name="关闭悬浮条">
+                        <TextBlock Text="×" FontFamily="Segoe UI Symbol" FontSize="16" IsTextScaleFactorEnabled="False"/>
+                    </Button>
                 </Grid>
             </Grid>
             """);
@@ -69,8 +78,6 @@ public sealed class OverlayWindow : Window
         Content = _root;
         ApplyTheme(settings.Theme);
         _root.ActualThemeChanged += Root_ActualThemeChanged;
-        // The existing WM_SETTINGCHANGE/display path schedules appearance recovery.
-        // WinRT accessibility/color event subscription can fail on unpackaged desktops.
         _backdrop.DiagnosticChanged += Backdrop_DiagnosticChanged;
         Activated += Window_Activated;
         Closed += Window_Closed;
@@ -89,6 +96,10 @@ public sealed class OverlayWindow : Window
         _positionTimer.Interval = TimeSpan.FromMilliseconds(600);
         _positionTimer.IsRepeating = false;
         _positionTimer.Tick += PositionTimer_Tick;
+        // Some unpackaged desktops reject this WinRT event. WM_SETTINGCHANGE and
+        // reopening still reread the value through the existing recovery path.
+        try { _uiSettings.TextScaleFactorChanged += UiSettings_TextScaleFactorChanged; _textScaleSubscribed = true; }
+        catch (Exception ex) when (ex is COMException or ObjectDisposedException or NotSupportedException) { }
         AppWindow.Move(new Windows.Graphics.PointInt32(settings.OverlayX ?? 80, settings.OverlayY ?? 80));
         RecoverPosition();
         AppWindow.Changed += AppWindow_Changed;
@@ -130,11 +141,33 @@ public sealed class OverlayWindow : Window
             if (_visible && !_closed && !_preparingToExit) { _positionTimer.Stop(); _positionTimer.Start(); }
         });
     }
+    private void UiSettings_TextScaleFactorChanged(UISettings sender, object args) => ScheduleRecovery();
+
+    private double ReadTextScale()
+    {
+        // Isolated diagnostic instances inject only their own factor; the real
+        // Windows text size and ordinary user instances are never modified.
+        if (AppPaths.IsDiagnostic)
+        {
+            try
+            {
+                string path = Path.Combine(AppPaths.DataDirectory, "overlay-text-scale.txt");
+                if (File.Exists(path) && double.TryParse(File.ReadAllText(path), NumberStyles.Float,
+                    CultureInfo.InvariantCulture, out double injected))
+                    return OverlayPresentation.NormalizeTextScale(injected);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+        try { return OverlayPresentation.NormalizeTextScale(_uiSettings.TextScaleFactor); }
+        catch (Exception ex) when (ex is COMException or ObjectDisposedException or NotSupportedException) { return 1; }
+    }
     private void RecoverPosition()
     {
         if (_closed || _preparingToExit) return;
         try
         {
+            var previousEnvironment = (_textScale, _scale, _availableWidthDip, _availableHeightDip);
+            _textScale = ReadTextScale();
             _fallback.Opacity = IsHighContrast() ? 1 : EffectiveOpacity;
             uint dpi = GetDpiForWindow(_clickThrough?.Handle ?? _windowHandle);
             _scale = dpi > 0 ? dpi / 96d : _root.XamlRoot?.RasterizationScale ?? 1;
@@ -147,6 +180,8 @@ public sealed class OverlayWindow : Window
                 return dx * dx + dy * dy;
             }).FirstOrDefault();
             _availableWidthDip = areas.Count == 0 ? 510 : nearest.Width / _scale;
+            _availableHeightDip = areas.Count == 0 ? double.PositiveInfinity : nearest.Height / _scale;
+            bool environmentChanged = previousEnvironment != (_textScale, _scale, _availableWidthDip, _availableHeightDip);
             RebuildPresentation();
             var size = OverlayPlacement.SizeForScale(_scale, _presentation.WidthDip, _presentation.HeightDip);
             if (_clickThrough is not null)
@@ -155,6 +190,7 @@ public sealed class OverlayWindow : Window
                 var recovered = OverlayPlacement.Recover(currentNative.X, currentNative.Y, size.Width, size.Height, areas);
                 _clickThrough.Invalidate();
                 RenderClickThrough(recovered.X, recovered.Y);
+                if (environmentChanged) RecordBackdropState("layout-environment-changed");
                 return;
             }
             if (AppWindow.Size.Width != size.Width || AppWindow.Size.Height != size.Height)
@@ -163,6 +199,7 @@ public sealed class OverlayWindow : Window
             var position = OverlayPlacement.Recover(current.X, current.Y, size.Width, size.Height, areas);
             if (position.X != current.X || position.Y != current.Y)
                 AppWindow.Move(new Windows.Graphics.PointInt32(position.X, position.Y));
+            if (environmentChanged) RecordBackdropState("layout-environment-changed");
         }
         catch (Exception ex) when (ex is COMException or ObjectDisposedException or Win32Exception)
         {
@@ -381,6 +418,19 @@ public sealed class OverlayWindow : Window
                 HighContrast = IsHighContrast(),
                 Error = _backdrop.Error,
                 RasterizationScale = _scale,
+                TextScaleFactor = _presentation.TextScale,
+                FontSizeDip = _presentation.FontSizeDip,
+                LineHeightDip = _presentation.LineHeightDip,
+                TextAutomaticScaleEnabled = _text.IsTextScaleFactorEnabled,
+                CloseAutomaticScaleEnabled = _closeButton.IsTextScaleFactorEnabled,
+                CloseFontSizeDip = _closeButton.FontSize,
+                CloseWidthDip = _closeButton.Width,
+                NativeFontPixelHeight = _clickThrough?.FontPixelHeight,
+                NativeLinePixelHeight = _clickThrough?.LinePixelHeight,
+                AvailableWidthDip = _availableWidthDip,
+                AvailableHeightDip = double.IsFinite(_availableHeightDip) ? (double?)_availableHeightDip : null,
+                SpaceLimited = _presentation.IsSpaceLimited,
+                SpaceLimitMessage = _presentation.IsSpaceLimited ? OverlayPresentation.SpaceLimitMessage : null,
                 ClickThrough = IsClickThrough,
                 BackgroundOpacity = _settings.OverlayOpacity,
                 Preset = OverlayPresentation.Normalize(_settings.OverlayPreset).ToString(),
@@ -407,6 +457,12 @@ public sealed class OverlayWindow : Window
         _root.Loaded -= Root_Loaded;
         _root.ActualThemeChanged -= Root_ActualThemeChanged;
         _closeButton.Click -= CloseButton_Click;
+        if (_textScaleSubscribed)
+        {
+            try { _uiSettings.TextScaleFactorChanged -= UiSettings_TextScaleFactorChanged; }
+            catch (Exception ex) when (ex is COMException or ObjectDisposedException or NotSupportedException) { }
+            _textScaleSubscribed = false;
+        }
         try
         {
             AppWindow.Changed -= AppWindow_Changed;
@@ -426,8 +482,17 @@ public sealed class OverlayWindow : Window
 
     private void RebuildPresentation()
     {
-        _presentation = OverlayPresentation.Create(_settings.OverlayPreset, _sample, _isLive, _compactStatus, _availableWidthDip);
+        _presentation = OverlayPresentation.Create(_settings.OverlayPreset, _sample, _isLive, _compactStatus,
+            _availableWidthDip, _textScale, _availableHeightDip, _scale);
         if (_text.Text != _presentation.Text) _text.Text = _presentation.Text;
+        if (_text.FontSize != _presentation.FontSizeDip) _text.FontSize = _presentation.FontSizeDip;
+        if (_text.LineHeight != _presentation.LineHeightDip) _text.LineHeight = _presentation.LineHeightDip;
+        string help = _presentation.IsSpaceLimited ? OverlayPresentation.SpaceLimitMessage : "";
+        if (Microsoft.UI.Xaml.Automation.AutomationProperties.GetHelpText(_root) != help)
+        {
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(_root, help);
+            ToolTipService.SetToolTip(_text, _presentation.IsSpaceLimited ? help : null);
+        }
     }
     private void PresentSample()
     {

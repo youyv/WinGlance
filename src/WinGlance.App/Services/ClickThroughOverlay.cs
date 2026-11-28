@@ -20,10 +20,13 @@ internal sealed class ClickThroughOverlay : IDisposable
     private nint _dc, _bitmap, _oldBitmap, _font, _oldFont, _bits;
     private byte[] _pixels = [];
     private int _width, _height;
+    private int _fontPixelHeight, _linePixelHeight;
     private double _scale;
-    private (string Text, bool Dark, bool HighContrast, double Opacity)? _lastPaint;
+    private (string Text, bool Dark, bool HighContrast, double Opacity, int FontHeight, int LineHeight)? _lastPaint;
     private bool _shown;
     internal nint Handle { get; private set; }
+    internal int FontPixelHeight => _fontPixelHeight;
+    internal int LinePixelHeight => _linePixelHeight;
     internal void Invalidate() => _lastPaint = null;
     internal void Hide()
     {
@@ -68,25 +71,29 @@ internal sealed class ClickThroughOverlay : IDisposable
         if (Handle == 0) throw new ObjectDisposedException(nameof(ClickThroughOverlay));
         string text = presentation.Text;
         var size = OverlayPlacement.SizeForScale(scale, presentation.WidthDip, presentation.HeightDip);
-        if (_width != size.Width || _height != size.Height || _scale != scale)
+        int fontPixelHeight = (int)Math.Ceiling(presentation.FontSizeDip * scale);
+        int linePixelHeight = (int)Math.Ceiling(presentation.LineHeightDip * scale);
+        if (_width != size.Width || _height != size.Height || _scale != scale || _fontPixelHeight != fontPixelHeight)
         {
-            CreateSurface(size.Width, size.Height, scale);
+            CreateSurface(size.Width, size.Height, scale, fontPixelHeight);
             _lastPaint = null;
         }
+        _linePixelHeight = linePixelHeight;
         opacity = double.IsFinite(opacity) ? Math.Clamp(opacity, .2, 1) : .8;
-        var paint = (text, dark, highContrast, opacity);
+        var paint = (text, dark, highContrast, opacity, fontPixelHeight, linePixelHeight);
         if (_lastPaint == paint && _shown && Position == (x, y)) return;
         if (_lastPaint != paint)
         {
             Array.Clear(_pixels);
             Marshal.Copy(_pixels, 0, _bits, _pixels.Length);
             var lines = text.Split('\n');
-            int lineHeight = (int)Math.Ceiling(OverlayPresentation.LineHeight * scale);
+            int lineHeight = linePixelHeight;
             int top = Math.Max(0, (_height - lines.Length * lineHeight) / 2);
             foreach (var line in lines)
             {
-                var rectangle = new Rect { Left = (int)Math.Ceiling(16 * scale), Top = top,
-                    Right = _width - (int)Math.Ceiling((OverlayPresentation.HorizontalChrome - 16) * scale), Bottom = top + lineHeight };
+                int left = Math.Min(_width, (int)Math.Ceiling(16 * scale));
+                var rectangle = new Rect { Left = left, Top = top,
+                    Right = Math.Max(left, _width - (int)Math.Ceiling((OverlayPresentation.HorizontalChrome - 16) * scale)), Bottom = top + lineHeight };
                 // Explicit shared line breaks; no truncation or renderer-dependent wrapping.
                 DrawText(_dc, line, line.Length, ref rectangle, 0x20 | 0x4 | 0x800);
                 top += lineHeight;
@@ -114,7 +121,7 @@ internal sealed class ClickThroughOverlay : IDisposable
         }
     }
 
-    private void CreateSurface(int width, int height, double scale)
+    private void CreateSurface(int width, int height, double scale, int fontPixelHeight)
     {
         ReleaseSurface();
         try
@@ -129,13 +136,13 @@ internal sealed class ClickThroughOverlay : IDisposable
             _bitmap = CreateDIBSection(_dc, ref info, 0, out _bits, 0, 0);
             if (_bitmap == 0 || _bits == 0) throw new Win32Exception(Marshal.GetLastWin32Error());
             _oldBitmap = SelectObject(_dc, _bitmap);
-            _font = CreateFont(-(int)Math.Ceiling(12 * scale), 0, 0, 0, 400,
+            _font = CreateFont(-fontPixelHeight, 0, 0, 0, 400,
                 0, 0, 0, 1, 0, 0, 4, 0, "Consolas");
             if (_font == 0) throw new Win32Exception(Marshal.GetLastWin32Error());
             _oldFont = SelectObject(_dc, _font);
             SetTextColor(_dc, 0xFFFFFF);
             SetBkMode(_dc, 1);
-            _width = width; _height = height; _scale = scale;
+            _width = width; _height = height; _scale = scale; _fontPixelHeight = fontPixelHeight;
             _pixels = new byte[checked(width * height * 4)];
         }
         catch { ReleaseSurface(); throw; }

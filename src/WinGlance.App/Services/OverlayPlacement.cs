@@ -8,7 +8,17 @@ internal static class OverlayPlacement
     {
         if (!double.IsFinite(scale) || scale <= 0) scale = 1;
         scale = Math.Clamp(scale, .5, 8);
-        return ((int)Math.Ceiling(widthDip * scale), (int)Math.Ceiling(heightDip * scale));
+        return (PixelCeiling(widthDip * scale), PixelCeiling(heightDip * scale));
+    }
+
+    private static int PixelCeiling(double pixels)
+    {
+        // A work-area pixel size divided by DPI and multiplied back can land one ULP
+        // above its original integer (900 / 1.75 * 1.75). Absorb only that rounding
+        // noise; real fractional pixels must still round upward.
+        double integer = Math.Round(pixels);
+        if (pixels > integer && pixels <= Math.BitIncrement(integer)) pixels = integer;
+        return (int)Math.Ceiling(pixels);
     }
 
     internal static (int X, int Y) Recover(int x, int y, int width, int height, IReadOnlyList<WorkArea> areas)
