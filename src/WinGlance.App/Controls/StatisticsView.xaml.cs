@@ -15,6 +15,9 @@ public sealed partial class StatisticsView : UserControl
     private readonly StatisticsService _service;
     private readonly ObservableCollection<StatisticsRow> _rows = [];
     private readonly DispatcherQueueTimer _timer;
+    private readonly DispatcherQueueTimer _exportTimer;
+    private StatisticsExportOperation? _exportOperation;
+    private bool _exportStopping;
     private StatisticsSnapshot? _snapshot;
     private bool _ready, _active, _refreshing, _refreshAgain, _resetting, _descending = true;
     private int _version;
@@ -26,6 +29,7 @@ public sealed partial class StatisticsView : UserControl
     public event Action? ReconnectRequested;
     public event Action? CollectionNoticeDismissed;
     public Func<StatisticsRange, Task<bool>>? ConfirmReset { get; set; }
+    internal Func<StatisticsExportFormat, string, CancellationToken, Task<string?>>? PickExportPath { get; set; }
     private StatisticsRange Range => (StatisticsRange)Math.Max(0, RangePicker.SelectedIndex);
 
     public StatisticsView(StatisticsService service, bool hideSystem)
@@ -38,11 +42,15 @@ public sealed partial class StatisticsView : UserControl
         _timer = DispatcherQueue.CreateTimer();
         _timer.Interval = TimeSpan.FromSeconds(2);
         _timer.Tick += (_, _) => Refresh();
+        _exportTimer = DispatcherQueue.CreateTimer();
+        _exportTimer.Interval = TimeSpan.FromMilliseconds(150);
+        _exportTimer.Tick += (_, _) => RenderExportPhase();
         _ready = true;
         UpdateHeaders();
     }
     public void SetActive(bool active)
     {
+        if (_exportStopping) return;
         _active = active;
         if (active) { _timer.Start(); Refresh(); } else { _timer.Stop(); _version++; }
     }
@@ -101,6 +109,7 @@ public sealed partial class StatisticsView : UserControl
         var cpu = Get(StatisticMetric.Cpu); var gpu = Get(StatisticMetric.Gpu);
         var memory = Get(StatisticMetric.Memory); var vram = Get(StatisticMetric.DedicatedGpuMemory);
         ObservationLabel.Text = $"{snapshot.StartUtc.LocalDateTime:MM-dd HH:mm} 至 {snapshot.EndUtc.LocalDateTime:MM-dd HH:mm} · 已观测 {StatisticsDisplay.Duration(snapshot.System.ObservedSeconds)}";
+        ToolTipService.SetToolTip(ObservationLabel, ObservationLabel.Text);
         NetworkTotal.Text = Display.Bytes(StatisticsDisplay.Total(m, StatisticMetric.Download, StatisticMetric.Upload));
         NetworkParts.Text = $"↓ {Display.Bytes(down?.Bytes)}    ↑ {Display.Bytes(up?.Bytes)}";
         NetworkCoverage.Text = StatisticsDisplay.Coverage(down) + " · 物理接口合计";
@@ -267,6 +276,94 @@ public sealed partial class StatisticsView : UserControl
     }
     private void CloseDetail_Click(object sender, RoutedEventArgs e) { _selectedId = null; HistoryDetail.Visibility = Visibility.Collapsed; RankingList.SelectedItem = null; }
     private void Enhanced_Click(object sender, RoutedEventArgs e) => EnhancedRequested?.Invoke();
+    private async void Export_Click(object sender, RoutedEventArgs e)
+    {
+        if (_exportStopping || _exportOperation is not null || PickExportPath is null) return;
+        var format = (sender as FrameworkElement)?.Tag as string == "Csv" ? StatisticsExportFormat.Csv : StatisticsExportFormat.Json;
+        var request = new StatisticsExportRequest(Range, StatsHideSystem.IsOn, StatsSearch.Text.Trim(),
+            _view, _sort, _descending, DateTimeOffset.UtcNow);
+        var operation = new StatisticsExportOperation(request, format);
+        _exportOperation = operation;
+        ExportButton.IsEnabled = false; ExportNotice.IsOpen = false;
+        ExportProgress.Visibility = Visibility.Visible; ExportSpinner.IsActive = true;
+        RenderExportPhase(); _exportTimer.Start();
+        StatisticsExportSnapshot? snapshot = null;
+        try
+        {
+            string extension = format == StatisticsExportFormat.Csv ? "csv" : "json";
+            string filename = $"WinGlance-{RangeName(request.Range)}-{request.RequestedAtUtc.ToLocalTime():yyyyMMdd-HHmmss}.{extension}";
+            string? path = await PickExportPath(format, filename, operation.Token);
+            if (path is null) operation.TryCancel();
+            else
+            {
+                // Preserve the overwrite intent immediately after selection, before querying.
+                var destination = StatisticsExportDestination.Capture(path);
+                if (!_exportStopping && operation.TryBeginCapture())
+                {
+                    RenderExportPhase();
+                    snapshot = await _service.CaptureExportAsync(request, operation.Token);
+                    // This check and WriteAsync's writer registration stay in one UI turn.
+                    if (_exportStopping || operation.Token.IsCancellationRequested) operation.TryCancel();
+                    else await StatisticsExporter.WriteAsync(operation, snapshot, destination);
+                }
+                else operation.TryCancel();
+            }
+        }
+        catch (OperationCanceledException) { operation.TryCancel(); }
+        catch (Exception error) when (error is not OutOfMemoryException) { operation.FailBeforeWrite(error); }
+        var result = await operation.Completion;
+        if (_exportStopping || !ReferenceEquals(_exportOperation, operation)) return;
+        _exportTimer.Stop(); ExportSpinner.IsActive = false; ExportProgress.Visibility = Visibility.Collapsed;
+        _exportOperation = null; ExportButton.IsEnabled = true;
+        ExportNotice.Severity = result.Phase == StatisticsExportPhase.Failed ? InfoBarSeverity.Error :
+            result.Warning is not null ? InfoBarSeverity.Warning : InfoBarSeverity.Informational;
+        ExportNotice.Title = result.Phase switch
+        {
+            StatisticsExportPhase.Completed => "导出完成",
+            StatisticsExportPhase.Cancelled => "已取消导出",
+            _ => "导出未完成"
+        };
+        string summary = result.Phase == StatisticsExportPhase.Completed && snapshot is not null ?
+            $"{RangeName(request.Range)} · 截至 {snapshot.AsOfUtc.ToLocalTime():MM-dd HH:mm:ss} · {snapshot.Applications.Count} 个应用\n" +
+            $"{(request.HideSystem ? "已隐藏 Windows 系统进程" : "包含 Windows 系统进程")}；{(request.Search.Length == 0 ? "无关键词筛选" : "关键词：“" + request.Search + "”")}。整机汇总及占比分母不受筛选影响。\n{result.DestinationPath}" :
+            result.Error ?? "未提交文件。";
+        if (result.Warning is { } warning) summary += "\n" + warning;
+        if (result.RecoveryPath is { } recovery) summary += "\n保留的恢复文件：" + recovery;
+        ExportResultText.Text = summary; ExportNotice.IsOpen = true;
+    }
+    private void CancelExport_Click(object sender, RoutedEventArgs e)
+    {
+        _exportOperation?.TryCancel(); RenderExportPhase();
+    }
+    private void RenderExportPhase()
+    {
+        if (_exportStopping || _exportOperation is not { } operation) return;
+        // Read the current state, so a delayed timer cannot re-enable cancellation at commit.
+        var phase = operation.Phase;
+        ExportPhaseLabel.Text = phase switch
+        {
+            StatisticsExportPhase.Selecting => "正在选择保存位置…",
+            StatisticsExportPhase.Capturing => "正在读取本次导出的统计快照…",
+            StatisticsExportPhase.Writing => "正在写入文件…",
+            StatisticsExportPhase.Committing => "正在完成保存…",
+            StatisticsExportPhase.Cancelled => "正在取消导出…",
+            _ => "正在完成导出…"
+        };
+        CancelExportButton.IsEnabled = phase is StatisticsExportPhase.Selecting or StatisticsExportPhase.Capturing or StatisticsExportPhase.Writing;
+    }
+    internal Task<StatisticsExportResult>? StopForExit()
+    {
+        _exportStopping = true;
+        _exportOperation?.TryCancel();
+        var writer = _exportOperation?.WriteTask;
+        _active = false; _version++;
+        // Retain the drain task even if the window's dispatcher is already being torn down.
+        try { _timer.Stop(); } catch (System.Runtime.InteropServices.COMException) { }
+        try { _exportTimer.Stop(); } catch (System.Runtime.InteropServices.COMException) { }
+        return writer;
+    }
+    private static string RangeName(StatisticsRange range) => range switch
+    { StatisticsRange.Today => "今日", StatisticsRange.LastSevenDays => "近7天", _ => "本次运行" };
     private async void Reset_Click(object sender, RoutedEventArgs e)
     {
         if (_resetting || ConfirmReset is null) return;

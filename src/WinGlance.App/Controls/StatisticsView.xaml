@@ -13,12 +13,19 @@
   <Grid>
     <Grid Padding="28,20,28,12" RowSpacing="14">
       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-      <Grid>
-        <StackPanel Spacing="4"><TextBlock Text="运行统计" FontSize="30" FontWeight="SemiBold"/><TextBlock x:Name="ObservationLabel" Text="正在读取本地统计…" Style="{StaticResource Muted}" FontSize="12"/></StackPanel>
-        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Spacing="10">
+      <Grid ColumnSpacing="16">
+        <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <StackPanel Spacing="4"><TextBlock Text="运行统计" FontSize="30" FontWeight="SemiBold"/><TextBlock x:Name="ObservationLabel" Text="正在读取本地统计…" Style="{StaticResource Muted}" FontSize="12" TextTrimming="CharacterEllipsis"/></StackPanel>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Spacing="10">
           <ComboBox x:Name="RangePicker" AutomationProperties.Name="统计时间范围" Width="124" SelectedIndex="0" SelectionChanged="Range_Changed"><ComboBoxItem Content="本次运行"/><ComboBoxItem Content="今日"/><ComboBoxItem Content="近 7 天"/></ComboBox>
           <Button x:Name="StatsEnhancedButton" Content="增强采集" Click="Enhanced_Click"/>
           <Button x:Name="ResetButton" Content="重置当前统计" Click="Reset_Click"/>
+          <DropDownButton x:Name="ExportButton" Content="导出" AutomationProperties.Name="导出当前统计">
+            <DropDownButton.Flyout><MenuFlyout>
+              <MenuFlyoutItem Text="导出为 CSV" Tag="Csv" Click="Export_Click" AutomationProperties.AutomationId="ExportCsv"/>
+              <MenuFlyoutItem Text="导出为 JSON" Tag="Json" Click="Export_Click" AutomationProperties.AutomationId="ExportJson"/>
+            </MenuFlyout></DropDownButton.Flyout>
+          </DropDownButton>
         </StackPanel>
       </Grid>
       <ScrollViewer x:Name="PageScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="0,0,4,0">
@@ -78,6 +85,15 @@
         </StackPanel>
       </ScrollViewer>
       <StackPanel Grid.Row="2" Spacing="8">
+        <Grid x:Name="ExportProgress" Visibility="Collapsed" ColumnSpacing="10">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <ProgressRing x:Name="ExportSpinner" IsActive="False" Width="20" Height="20"/>
+          <TextBlock x:Name="ExportPhaseLabel" Grid.Column="1" VerticalAlignment="Center" FontSize="12" TextWrapping="Wrap"/>
+          <Button x:Name="CancelExportButton" Grid.Column="2" Content="取消导出" Click="CancelExport_Click" Padding="10,3"/>
+        </Grid>
+        <InfoBar x:Name="ExportNotice" IsOpen="False" IsClosable="True" Title="统计导出">
+          <InfoBar.Content><TextBlock x:Name="ExportResultText" TextWrapping="Wrap" IsTextSelectionEnabled="True" FontSize="12"/></InfoBar.Content>
+        </InfoBar>
         <InfoBar x:Name="CollectionNotice" Title="采集提示" IsOpen="False" IsClosable="True" Severity="Warning" CloseButtonClick="CollectionNotice_CloseButtonClick"/>
         <Grid><TextBlock x:Name="CollectionStatus" FontSize="11" Style="{StaticResource Muted}" TextTrimming="CharacterEllipsis" Margin="0,0,150,0"/><Button x:Name="StatsReconnectButton" Content="恢复普通采集" Click="Reconnect_Click" HorizontalAlignment="Right" FontSize="11" Padding="8,2"/></Grid>
         <TextBlock x:Name="SaveStatus" Text="每 30 秒自动保存 · 历史保留 7 天" FontSize="11" Style="{StaticResource Muted}" TextTrimming="CharacterEllipsis"/>

@@ -84,9 +84,10 @@ public sealed partial class StatisticsService : IAsyncDisposable
     public Task<ApplicationStatisticsDetail> QueryApplicationAsync(StatisticsRange range, string appId,
         CancellationToken cancellationToken = default) => Enqueue(() =>
         {
-            var snapshot = Query(range);
+            var context = CreateQueryContext(range, cancellationToken);
+            var snapshot = Query(context, useCache: false);
             return new ApplicationStatisticsDetail(snapshot.Applications.FirstOrDefault(app => app.AppId == appId),
-                ReadTrend(range, appId));
+                ReadTrend(context, appId));
         }, cancellationToken, "queryApplication");
 
     public Task ResetAsync(StatisticsRange range, CancellationToken cancellationToken = default) =>
@@ -100,7 +101,7 @@ public sealed partial class StatisticsService : IAsyncDisposable
         if (cancellationToken.IsCancellationRequested) return Task.FromCanceled<T>(cancellationToken);
         if (_fatalError is { } error) return Task.FromException<T>(new IOException("统计存储不可用。", error));
         if (Volatile.Read(ref _accepting) == 0) return Task.FromException<T>(new ObjectDisposedException(nameof(StatisticsService)));
-        var work = new RequestWork<T>(action, operation, flushReason);
+        var work = new RequestWork<T>(action, operation, flushReason, cancellationToken);
         work.Queued();
         if (!_queue.Writer.TryWrite(work))
         { work.Rejected(); return Task.FromException<T>(new ObjectDisposedException(nameof(StatisticsService))); }
@@ -143,6 +144,10 @@ public sealed partial class StatisticsService : IAsyncDisposable
                         default: work.Execute(); break;
                     }
                     work.Finished(executionStarted);
+                }
+                catch (OperationCanceledException) when (work.IsCancellationRequested)
+                {
+                    work.Cancel();
                 }
                 catch (Exception ex)
                 {
@@ -465,13 +470,21 @@ public sealed partial class StatisticsService : IAsyncDisposable
         }
         public virtual void Execute() { }
         public virtual void Fail(Exception exception) { }
+        public virtual bool IsCancellationRequested => false;
+        public virtual void Cancel() { }
     }
     private sealed record SampleWork(MonitorSnapshot Snapshot) : Work("sample");
     private sealed record FlushWork() : Work("flush", "periodic");
-    private sealed record RequestWork<T>(Func<T> Action, string Name, string? Reason) : Work(Name, Reason)
+    private sealed record RequestWork<T>(Func<T> Action, string Name, string? Reason, CancellationToken Token) : Work(Name, Reason)
     {
         public TaskCompletionSource<T> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public override void Execute() => Completion.TrySetResult(Action());
+        public override bool IsCancellationRequested => Token.IsCancellationRequested;
+        public override void Execute()
+        {
+            Token.ThrowIfCancellationRequested();
+            Completion.TrySetResult(Action());
+        }
+        public override void Cancel() => Completion.TrySetCanceled(Token);
         public override void Fail(Exception exception) => Completion.TrySetException(exception);
     }
 }

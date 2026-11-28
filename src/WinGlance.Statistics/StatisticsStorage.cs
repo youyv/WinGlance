@@ -243,34 +243,46 @@ public sealed partial class StatisticsService
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { _retryIconCleanup = true; }
     }
 
-    private StatisticsSnapshot Query(StatisticsRange range)
+    private readonly record struct QueryContext(StatisticsRange Range, DateTimeOffset Now, CancellationToken Token);
+
+    private QueryContext CreateQueryContext(StatisticsRange range, CancellationToken token = default)
     {
         ValidateRange(range);
-        var now = _clock.GetUtcNow();
-        if (_queryCache.TryGetValue(range, out var cached) && LocalDate(cached.EndUtc) == LocalDate(now) &&
+        token.ThrowIfCancellationRequested();
+        return new(range, _clock.GetUtcNow(), token);
+    }
+
+    private StatisticsSnapshot Query(StatisticsRange range) => Query(CreateQueryContext(range));
+
+    private StatisticsSnapshot Query(QueryContext context, bool useCache = true, bool includeTrend = true)
+    {
+        var (range, now, token) = context;
+        token.ThrowIfCancellationRequested();
+        if (useCache && _queryCache.TryGetValue(range, out var cached) && LocalDate(cached.EndUtc) == LocalDate(now) &&
             string.Equals(cached.Warning, Warning, StringComparison.Ordinal)) return cached;
-        var totals = ReadRange(range, true, null).GroupBy(item => item.Key.Entity)
+        var totals = ReadRange(context, true, null).GroupBy(item => item.Key.Entity)
             .ToDictionary(group => group.Key, group => Merge(group.Select(item => item.Data)));
         var system = totals.GetValueOrDefault(SystemEntity) ?? new();
         var apps = new List<ApplicationStatistics>();
         foreach (var (id, total) in totals)
         {
+            token.ThrowIfCancellationRequested();
             if (id == SystemEntity || !_applications.TryGetValue(id, out var entry)) continue;
             apps.Add(new(id, entry.Software, total.ObservedSeconds, _running.Contains(id), entry.LastSeenUtc, total.SnapshotMetrics()));
         }
         var start = RangeStart(range, now);
         var result = new StatisticsSnapshot(range, start, now, _sessionId, new(system.ObservedSeconds, system.SnapshotMetrics()),
             apps.OrderByDescending(app => app.ObservedSeconds).ThenBy(app => app.Software.DisplayName).ToArray(),
-            ReadTrend(range, SystemEntity), _lastRecorded, _lastReset, Warning, _lastSaved,
+            includeTrend ? ReadTrend(context, SystemEntity) : [], _lastRecorded, _lastReset, Warning, _lastSaved,
             !system.MemoryCapacityUnknown && system.MemoryCapacityMin == system.MemoryCapacityMax ? system.MemoryCapacityMin : null,
             !system.GpuCapacityUnknown && system.GpuCapacityMin == system.GpuCapacityMax ? system.GpuCapacityMin : null,
             string.Join(" / ", system.NetworkScopes.Order(StringComparer.Ordinal)), system.Quality());
-        _queryCache[range] = result;
+        if (useCache) _queryCache[range] = result;
         return result;
     }
 
-    private IReadOnlyList<StatisticsTrendPoint> ReadTrend(StatisticsRange range, string entity) =>
-        ReadRange(range, false, entity).GroupBy(item => TrendWindow(item, entity))
+    private IReadOnlyList<StatisticsTrendPoint> ReadTrend(QueryContext context, string entity) =>
+        ReadRange(context, false, entity).GroupBy(item => TrendWindow(item, entity, context.Now))
             .OrderBy(group => group.Key.Start).Select(group =>
             {
                 var total = Merge(group.Select(item => item.Data));
@@ -278,18 +290,19 @@ public sealed partial class StatisticsService
                     total.ObservedSeconds, total.SnapshotMetrics());
             }).ToArray();
 
-    private (long Start, long End) TrendWindow(StoredBucket item, string entity)
+    private static (long Start, long End) TrendWindow(StoredBucket item, string entity, DateTimeOffset now)
     {
         long hour = TimeSpan.TicksPerHour;
-        long cutoff = _clock.GetUtcNow().AddHours(-24).UtcTicks / hour * hour;
+        long cutoff = now.AddHours(-24).UtcTicks / hour * hour;
         if (entity != SystemEntity && item.End <= cutoff)
         { long start = item.Key.Start / hour * hour; return (start, start + hour); }
         return (item.Key.Start, item.End);
     }
 
-    private IReadOnlyList<StoredBucket> ReadRange(StatisticsRange range, bool days, string? entity)
+    private IReadOnlyList<StoredBucket> ReadRange(QueryContext context, bool days, string? entity)
     {
-        var now = _clock.GetUtcNow();
+        var (range, now, token) = context;
+        token.ThrowIfCancellationRequested();
         string firstDay = LocalDate(now).AddDays(range == StatisticsRange.LastSevenDays ? -6 : 0).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         string lastDay = LocalDate(now).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         var items = new Dictionary<BucketKey, StoredBucket>();
@@ -304,6 +317,7 @@ public sealed partial class StatisticsService
             using var reader = command.ExecuteReader();
             while (reader.Read())
             {
+                token.ThrowIfCancellationRequested();
                 var key = new BucketKey(reader.GetString(0), reader.GetString(1), reader.GetInt32(2), reader.GetInt64(3), reader.GetString(5));
                 if (!_storedReadCache.TryGetValue(key, out var item))
                 {
@@ -315,6 +329,7 @@ public sealed partial class StatisticsService
         }
         foreach (var item in _pending.Values)
         {
+            token.ThrowIfCancellationRequested();
             if ((item.Key.Kind == 0) != days || entity is not null && item.Key.Entity != entity ||
                 !InRange(item.Key, range, firstDay, lastDay)) continue;
             var merged = new BucketData();

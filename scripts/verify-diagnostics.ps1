@@ -1,4 +1,4 @@
-﻿param([string]$BinaryDirectory = 'artifacts\repair-baseline')
+﻿param([string]$BinaryDirectory = 'artifacts\repair-baseline', [switch]$InitializeOnly)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 Add-Type -AssemblyName UIAutomationClient
@@ -20,6 +20,7 @@ $binary = Join-Path ([IO.Path]::GetFullPath((Join-Path $projectRoot $BinaryDirec
 $runRoot = Join-Path $projectRoot ('artifacts\smoke-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 New-Item -ItemType Directory -Path $runRoot | Out-Null
 $checks = [Collections.Generic.List[string]]::new()
+$cleanup = [Collections.Generic.List[string]]::new()
 $tree = [System.Windows.Automation.TreeScope]::Descendants
 function Assert($condition, $message) { if (-not $condition) { throw $message }; $checks.Add($message); Write-Output "PASS $message" }
 function WaitFor([scriptblock]$test, [int]$seconds=30) {
@@ -61,6 +62,8 @@ function StartFixture($name, [bool]$initialOverlay=$false, [string]$fault='', [b
  $script:app = [Diagnostics.Process]::Start($info)
  $script:root = WaitFor { [System.Windows.Automation.AutomationElement]::RootElement.FindFirst([System.Windows.Automation.TreeScope]::Children,[System.Windows.Automation.AndCondition]::new([System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ProcessIdProperty,$script:app.Id),[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,'WinGlance'))) }
  $script:handle = [IntPtr]$script:root.Current.NativeWindowHandle
+ [SmokeNative]::SetWindowPos($script:handle,[IntPtr](-1),0,0,0,0,0x13) | Out-Null
+ [SmokeNative]::SetForegroundWindow($script:handle) | Out-Null
  WaitFor { (Text 'LiveLabel') -eq '实时 · 1 秒' } | Out-Null
 }
 function StopFixture {
@@ -71,9 +74,13 @@ function StopFixture {
   [SmokeNative]::PostMessage($script:handle,0x16,[IntPtr]1,[IntPtr]0) | Out-Null
   Start-Sleep -Milliseconds 500
   [SmokeNative]::PostMessage($script:handle,0x10,[IntPtr]0,[IntPtr]0) | Out-Null
-  if (-not $script:app.WaitForExit(6000)) { $script:app.Kill() }
+  if (-not $script:app.WaitForExit(6000)) {
+   $cleanup.Add("Owned diagnostic PID $($script:app.Id) required forced cleanup after its normal exit deadline.")
+   $script:app.Kill()
+  }
  }
 }
+if ($InitializeOnly) { return }
 try {
  StartFixture 'live'
  SelectApp '诊断应用 000'
@@ -132,5 +139,6 @@ try {
  throw
 } finally {
  StopFixture
- @{Checks=$checks.ToArray(); Count=$checks.Count; Binary=$binary; RunRoot=$runRoot; Finished=[DateTimeOffset]::Now.ToString('o')} | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $runRoot 'verification.json') -Encoding utf8
+ @{Checks=$checks.ToArray(); Count=$checks.Count; CleanupErrors=$cleanup.ToArray(); Binary=$binary; RunRoot=$runRoot; Finished=[DateTimeOffset]::Now.ToString('o')} | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $runRoot 'verification.json') -Encoding utf8
 }
+if ($cleanup.Count -gt 0) { throw 'Diagnostic cleanup did not complete normally; inspect verification.json.' }

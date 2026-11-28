@@ -29,6 +29,7 @@ public sealed partial class MainWindow : Window
     private StatisticsView? _statisticsView;
     private bool _statisticsSelected;
     private volatile bool _exitStarted;
+    private Task _exportDrain = Task.CompletedTask;
     private readonly TrayIcon _tray;
     private readonly SessionEndCoordinator _sessionEnd;
     private MonitorSnapshot? _latest;
@@ -74,7 +75,7 @@ public sealed partial class MainWindow : Window
         ProcessList.ItemsSource = _rows;
         ProcessList.ContainerContentChanging += (_, args) => ListViewMotion.Reset(args.ItemContainer);
         _sessionEnd = new SessionEndCoordinator(
-            () => { _exitStarted = true; _connections.Dispose(); _statisticsView?.SetActive(false); _client.Dispose(); _overlay?.PrepareForExit(); },
+            StopForExit,
             () => _statistics.FlushAsync(), FinishPersistenceAsync, LogSaveError);
         _tray = new TrayIcon(WinRT.Interop.WindowNative.GetWindowHandle(this))
         {
@@ -513,14 +514,36 @@ public sealed partial class MainWindow : Window
         try { File.AppendAllText(Path.Combine(AppPaths.DataDirectory, "statistics-error.log"), $"{DateTimeOffset.Now:O} exit: {message}\n"); } catch (IOException) { } catch (UnauthorizedAccessException) { }
     }
 
+    private void StopForExit()
+    {
+        _exitStarted = true;
+        // Cancel selection/capture first and retain only the independent writer to drain.
+        _exportDrain = _statisticsView?.StopForExit() is { } writer
+            ? ObserveExportExitAsync(writer) : Task.CompletedTask;
+        foreach (Action cleanup in new Action[] { _connections.Dispose, _client.Dispose, () => _overlay?.PrepareForExit() })
+        {
+            try { cleanup(); }
+            catch (Exception error) when (error is not OutOfMemoryException) { LogSaveError(error.ToString()); }
+        }
+    }
+
+    private static Task ObserveExportExitAsync(Task<StatisticsExportResult> writer) => Task.Run(async () =>
+    {
+        var result = await writer.ConfigureAwait(false);
+        if (result.Phase == StatisticsExportPhase.Failed || result.Warning is not null || result.RecoveryPath is not null)
+            LogSaveError($"导出 {result.Phase}：{result.Error} {result.Warning} 恢复文件：{result.RecoveryPath}");
+    });
+
     private async Task FinishPersistenceAsync()
     {
         // Serialize settings on the UI thread, then write/drain without blocking it.
         var save = _settings.SaveAsync();
+        var export = _exportDrain;
         try { await _statistics.DisposeAsync().ConfigureAwait(false); }
         finally
         {
             // A statistics failure must not let ExitApp terminate an unfinished settings write.
+            await Task.WhenAll(save, export).ConfigureAwait(false);
             var error = await save.ConfigureAwait(false);
             if (error is not null) LogSaveError(error);
         }
@@ -533,7 +556,13 @@ public sealed partial class MainWindow : Window
         if (_statisticsSelected == statistics || _exitStarted) return;
         if (statistics && _statisticsView is null)
         {
-            _statisticsView = new StatisticsView(_statistics, _settings.HideSystem) { ConfirmReset = ConfirmStatisticsResetAsync };
+            nint owner = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            _statisticsView = new StatisticsView(_statistics, _settings.HideSystem)
+            {
+                ConfirmReset = ConfirmStatisticsResetAsync,
+                PickExportPath = (format, name, token) => NativeSaveDialog.PickAsync(owner, name,
+                    format == StatisticsExportFormat.Csv ? "csv" : "json", token)
+            };
             _statisticsView.HideSystemChanged += hidden => { HideSystemToggle.IsOn = hidden; };
             _statisticsView.EnhancedRequested += () => { _ = _client.StartAsync(true); };
             _statisticsView.ReconnectRequested += () => { _ = _client.StartAsync(false, forceReconnect: true); };
