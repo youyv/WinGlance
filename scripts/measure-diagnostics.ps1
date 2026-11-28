@@ -10,6 +10,7 @@ param(
     [switch]$SkipCycles,
     [switch]$CyclesOnly,
     [switch]$InitializeOnly,
+    [ValidateRange(0, 3)][int]$OverlayPreset = 0,
     [int[]]$ProtectedProcessIds = @(18984, 17224)
 )
 
@@ -240,7 +241,7 @@ function Start-Diagnostic([string]$name, [string]$scenario, [bool]$cyclesOnly = 
     $clickThrough = $scenario -in @('ClickThrough', 'TrayClickThrough')
     $showOverlay = -not $cyclesOnly -and $scenario -in @('Acrylic', 'ClickThrough', 'TrayClickThrough')
     Write-JsonFile ([ordered]@{ Theme = 'Dark'; HideSystem = $true; CloseToTray = $false; ShowOverlay = $showOverlay;
-        OverlayClickThrough = $clickThrough; OverlayOpacity = 0.8; OverlayX = 24; OverlayY = 24 }) (Join-Path $directory 'settings.json')
+        OverlayClickThrough = $clickThrough; OverlayOpacity = 0.8; OverlayPreset = $OverlayPreset; OverlayX = 24; OverlayY = 24 }) (Join-Path $directory 'settings.json')
     $info = [Diagnostics.ProcessStartInfo]::new($AppPath)
     $info.WorkingDirectory = $packageDirectory
     $info.UseShellExecute = $false
@@ -346,7 +347,7 @@ $environment = [pscustomobject]@{
     OS = [Environment]::OSVersion.VersionString; LogicalProcessors = [Environment]::ProcessorCount
     Processor = @(Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors)
     Computer = Get-CimInstance Win32_ComputerSystem | Select-Object TotalPhysicalMemory
-    PowerPlan = $powerBefore; Theme = 'Dark'; SampleIntervalSeconds = 1
+    PowerPlan = $powerBefore; Theme = 'Dark'; OverlayPreset = $OverlayPreset; SampleIntervalSeconds = 1
     Fixture = '100 synthetic applications at 1 Hz; application 000 owns 40 real UDP loopback sockets'
     DatabaseTemplate = 'A new empty writable database per instance; no user data or prior history'
     PackageDirectory = $packageDirectory; GitCommit = (& git -C $projectRoot rev-parse HEAD | Out-String).Trim()
